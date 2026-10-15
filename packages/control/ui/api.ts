@@ -67,6 +67,12 @@ export interface Run {
   created_at: string
 }
 
+export interface PaginatedRuns {
+  runs: Run[]
+  next_cursor: string | null
+  has_more: boolean
+}
+
 export interface AgentSummary {
   id: string
   label: string

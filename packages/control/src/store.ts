@@ -373,10 +373,47 @@ export class Store {
     return this.db.query<RunRow, [string]>("SELECT * FROM runs WHERE id = ?").get(id)
   }
 
+  getAgentRun(agentId: string, runId: string): RunRow | null {
+    return this.db
+      .query<RunRow, [string, string]>("SELECT * FROM runs WHERE agent_id = ? AND id = ?")
+      .get(agentId, runId)
+  }
+
   runs(agentId: string, limit: number): RunRow[] {
     return this.db
-      .query<RunRow, [string, number]>("SELECT * FROM runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?")
+      .query<RunRow, [string, number]>("SELECT * FROM runs WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
       .all(agentId, limit)
+  }
+
+  runsPaginated(
+    agentId: string,
+    limit: number,
+    cursor?: { createdAt: string; id: string } | null,
+  ): { runs: RunRow[]; hasMore: boolean; nextCursor: { createdAt: string; id: string } | null } {
+    const fetchLimit = limit + 1
+    const rows = cursor
+      ? this.db
+          .query<RunRow, [string, string, string, string, number]>(
+            `SELECT * FROM runs
+             WHERE agent_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(agentId, cursor.createdAt, cursor.createdAt, cursor.id, fetchLimit)
+      : this.db
+          .query<RunRow, [string, number]>(
+            `SELECT * FROM runs
+             WHERE agent_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(agentId, fetchLimit)
+
+    const hasMore = rows.length > limit
+    const runs = hasMore ? rows.slice(0, limit) : rows
+    const last = runs.length > 0 ? runs[runs.length - 1] : null
+    const nextCursor = hasMore && last ? { createdAt: last.created_at, id: last.id } : null
+    return { runs, hasMore, nextCursor }
   }
 
   recordHeartbeat(run: RunRow): RunStatus {
