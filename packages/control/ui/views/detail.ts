@@ -187,9 +187,24 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
     try {
       const minted = await api.post<{ command: string; expires_at: string }>(`/api/agents/${id}/install-command`)
       const copy = iconButton("copy", "Copy the install command", async () => {
-        await navigator.clipboard.writeText(minted.command)
-        replace(copy, icon("check"))
-        toast("Copied")
+        try {
+          await navigator.clipboard.writeText(minted.command)
+          commandBox.querySelector("[data-copy-fallback]")?.remove()
+          replace(copy, icon("check"))
+          toast("Copied")
+        } catch {
+          replace(copy, icon("copy"))
+          toast("Copy failed — see instructions below.")
+          if (!commandBox.querySelector("[data-copy-fallback]")) {
+            commandBox.appendChild(
+              h(
+                "p",
+                { class: "hint", "data-copy-fallback": "true" },
+                `Clipboard copy failed. Select the command above and press Ctrl+C (or ⌘+C on macOS) before ${new Date(minted.expires_at).toLocaleTimeString()}. To retry copying, reuse this command — only create a new one after this one expires.`,
+              ),
+            )
+          }
+        }
       })
       replace(
         commandBox,
