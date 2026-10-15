@@ -35,6 +35,8 @@ import type { AgentRow, RunRow, SecretInput, Store } from "./store"
 
 const MAX_ADMIN_BODY_BYTES = 1024 * 1024
 const RUNS_SHOWN = 50
+const DEFAULT_RUNS_PAGE = 20
+const MAX_RUNS_PAGE = 100
 const EVENTS_PAGE = 1000
 
 const AWS_SECRET_ARN = /^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/
@@ -414,16 +416,16 @@ export class AdminApi {
     this.agentOr404(id)
     const url = new URL(req.url)
     const limitParam = url.searchParams.get("limit")
-    let limit = 20
+    let limit = DEFAULT_RUNS_PAGE
     if (limitParam !== null) {
       const parsed = Number(limitParam)
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-        throw new HttpError(400, "limit must be an integer between 1 and 100")
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_RUNS_PAGE) {
+        throw new HttpError(400, `limit must be an integer between 1 and ${MAX_RUNS_PAGE}`)
       }
       limit = parsed
     }
     const cursorParam = url.searchParams.get("cursor")
-    const cursor = cursorParam ? decodeCursor(cursorParam) : null
+    const cursor = cursorParam !== null ? decodeCursor(cursorParam) : null
     const result = this.store.runsPaginated(
       id,
       limit,
