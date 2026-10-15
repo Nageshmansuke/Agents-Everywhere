@@ -301,13 +301,29 @@ describe("paginated run history and direct lookup", () => {
         ).run(runId, agent.id, createdAt)
       }
 
+      // Insert pending install-command runs: these should not consume slots or affect total count
+      db.query(
+        "INSERT INTO runs (id, agent_id, status, created_at) VALUES ('pending-run-1', ?, 'pending', ?)",
+      ).run(agent.id, new Date(baseTime + 10000).toISOString())
+      db.query(
+        "INSERT INTO runs (id, agent_id, status, created_at) VALUES ('pending-run-2', ?, 'pending', ?)",
+      ).run(agent.id, new Date(baseTime + 20000).toISOString())
+
+      // Detail exposes total_runs excluding pending
+      const detailRes = await admin("GET", `/api/agents/${agent.id}`)
+      expect(detailRes.status).toBe(200)
+      const detail = (await detailRes.json()) as any
+      expect(detail.total_runs).toBe(55)
+
       // Page 1 (limit 20)
       const page1Res = await admin("GET", `/api/agents/${agent.id}/runs?limit=20`)
       expect(page1Res.status).toBe(200)
       const page1 = (await page1Res.json()) as any
       expect(page1.runs.length).toBe(20)
+      expect(page1.total).toBe(55)
       expect(page1.has_more).toBe(true)
       expect(page1.next_cursor).toBeTruthy()
+      expect(page1.runs.some((r: any) => r.status === "pending")).toBe(false)
       expect(page1.runs.map((r: any) => r.id)).toEqual(allRunIds.slice(0, 20))
 
       // Page 2 (limit 20)
@@ -318,6 +334,7 @@ describe("paginated run history and direct lookup", () => {
       expect(page2Res.status).toBe(200)
       const page2 = (await page2Res.json()) as any
       expect(page2.runs.length).toBe(20)
+      expect(page2.total).toBe(55)
       expect(page2.has_more).toBe(true)
       expect(page2.next_cursor).toBeTruthy()
       expect(page2.runs.map((r: any) => r.id)).toEqual(allRunIds.slice(20, 40))
@@ -330,6 +347,7 @@ describe("paginated run history and direct lookup", () => {
       expect(page3Res.status).toBe(200)
       const page3 = (await page3Res.json()) as any
       expect(page3.runs.length).toBe(15)
+      expect(page3.total).toBe(55)
       expect(page3.has_more).toBe(false)
       expect(page3.next_cursor).toBeNull()
       expect(page3.runs.map((r: any) => r.id)).toEqual(allRunIds.slice(40, 55))

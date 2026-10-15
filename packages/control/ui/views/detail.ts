@@ -114,6 +114,7 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
   let pageIndex = 0
   let pageCursors: Array<string | null> = [null]
   let currentRuns: Run[] = []
+  let totalRuns = agent.total_runs ?? agent.runs.filter((r) => r.status !== "pending").length
   let hasMore = false
   let nextCursor: string | null = null
 
@@ -123,10 +124,15 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
     const res = await api.get<PaginatedRuns>(url)
     pageIndex = index
     currentRuns = res.runs.filter((r) => r.status !== "pending")
+    if (typeof res.total === "number") {
+      totalRuns = res.total
+    }
     hasMore = res.has_more
     nextCursor = res.next_cursor
-    if (nextCursor && pageCursors.length <= index + 1) {
-      pageCursors[index + 1] = nextCursor
+    // Replace forward cursor for the current page and discard any beyond
+    pageCursors = pageCursors.slice(0, index + 1)
+    if (nextCursor) {
+      pageCursors.push(nextCursor)
     }
     drawRuns()
   }
@@ -134,7 +140,7 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
   const drawRuns = () => {
     const live = agent.runs.filter((r) => isLive(r.status)).length
     const runs = currentRuns
-    const totalRunsCount = agent.runs.filter((r) => r.status !== "pending").length
+    const totalRunsCount = totalRuns
     replaceIfChanged(band, `${agent.total_cost_usd}:${agent.total_tokens_in}:${agent.total_tokens_out}:${live}:${totalRunsCount}`, () => [
       h(
         "div",
@@ -145,7 +151,7 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
         stat("Tokens", (agent.total_tokens_in + agent.total_tokens_out).toLocaleString()),
       ),
     ])
-    if (pageIndex === 0 && runs.length === 0) {
+    if (pageIndex === 0 && runs.length === 0 && !hasMore) {
       replaceIfChanged(runsBody, "none", () => [h("p", { class: "panel-body muted" }, "No machine has run this agent yet.")])
       return
     }
@@ -218,10 +224,17 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
     const url = `/api/agents/${id}/runs?limit=${RUNS_PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`
     const res = await api.get<PaginatedRuns>(url)
     currentRuns = res.runs.filter((r) => r.status !== "pending")
+    if (typeof res.total === "number") {
+      totalRuns = res.total
+    } else if (typeof agent.total_runs === "number") {
+      totalRuns = agent.total_runs
+    }
     hasMore = res.has_more
     nextCursor = res.next_cursor
-    if (nextCursor && pageCursors.length <= pageIndex + 1) {
-      pageCursors[pageIndex + 1] = nextCursor
+    // Replace forward cursor for the current page and discard any beyond
+    pageCursors = pageCursors.slice(0, pageIndex + 1)
+    if (nextCursor) {
+      pageCursors.push(nextCursor)
     }
     drawRuns()
     await drawApprovals()

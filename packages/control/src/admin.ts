@@ -251,6 +251,7 @@ export class AdminApi {
         provider_config: parseJson(s.provider_config, {}),
       })),
       runs: this.store.runs(agent.id, RUNS_SHOWN).map(runOut),
+      total_runs: this.store.agentRunCount(agent.id),
       pending_permission_requests: this.store.requests(agent.id, true, 500).length,
       total_cost_usd: usage.cost ?? 0,
       total_tokens_in: usage.tokens_in ?? 0,
@@ -433,6 +434,7 @@ export class AdminApi {
     )
     return json({
       runs: result.runs.map(runOut),
+      total: result.total,
       next_cursor: result.nextCursor
         ? encodeCursor({ created_at: result.nextCursor.createdAt, id: result.nextCursor.id })
         : null,

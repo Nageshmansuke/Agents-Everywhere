@@ -69,6 +69,7 @@ export interface Run {
 
 export interface PaginatedRuns {
   runs: Run[]
+  total?: number
   next_cursor: string | null
   has_more: boolean
 }
@@ -100,6 +101,7 @@ export interface Agent extends AgentSummary {
   use_global_config: boolean
   secrets: Array<Secret & { id: string }>
   runs: Run[]
+  total_runs?: number
   total_tokens_in: number
   total_tokens_out: number
 }

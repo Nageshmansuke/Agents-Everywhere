@@ -385,17 +385,25 @@ export class Store {
       .all(agentId, limit)
   }
 
+  agentRunCount(agentId: string): number {
+    return (
+      this.db
+        .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM runs WHERE agent_id = ? AND status != 'pending'")
+        .get(agentId)?.n ?? 0
+    )
+  }
+
   runsPaginated(
     agentId: string,
     limit: number,
     cursor?: { createdAt: string; id: string } | null,
-  ): { runs: RunRow[]; hasMore: boolean; nextCursor: { createdAt: string; id: string } | null } {
+  ): { runs: RunRow[]; hasMore: boolean; nextCursor: { createdAt: string; id: string } | null; total: number } {
     const fetchLimit = limit + 1
     const rows = cursor
       ? this.db
           .query<RunRow, [string, string, string, string, number]>(
             `SELECT * FROM runs
-             WHERE agent_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+             WHERE agent_id = ? AND status != 'pending' AND (created_at < ? OR (created_at = ? AND id < ?))
              ORDER BY created_at DESC, id DESC
              LIMIT ?`,
           )
@@ -403,7 +411,7 @@ export class Store {
       : this.db
           .query<RunRow, [string, number]>(
             `SELECT * FROM runs
-             WHERE agent_id = ?
+             WHERE agent_id = ? AND status != 'pending'
              ORDER BY created_at DESC, id DESC
              LIMIT ?`,
           )
@@ -413,7 +421,8 @@ export class Store {
     const runs = hasMore ? rows.slice(0, limit) : rows
     const last = runs.length > 0 ? runs[runs.length - 1] : null
     const nextCursor = hasMore && last ? { createdAt: last.created_at, id: last.id } : null
-    return { runs, hasMore, nextCursor }
+    const total = this.agentRunCount(agentId)
+    return { runs, hasMore, nextCursor, total }
   }
 
   recordHeartbeat(run: RunRow): RunStatus {
