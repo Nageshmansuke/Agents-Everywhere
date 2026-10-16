@@ -2,7 +2,7 @@ import { api, ApiError, type Agent, type RunEvent } from "../api"
 import { clock, h, money, replace, replaceIfChanged, toast } from "../dom"
 import { icon } from "../icons"
 import { poll } from "../poll"
-import { button, iconButton, isLive, runStatus, sectionHead } from "../shared"
+import { button, isLive, runStatus, sectionHead } from "../shared"
 
 const REFRESH_MS = 3000
 
@@ -70,18 +70,41 @@ export async function renderRun(main: HTMLElement, agentId: string, runId: strin
   const header = h("div")
   const statusLine = h("div", { class: "masthead-meta" })
   // A plain-text copy of what is on screen, for pasting into a ticket or a review.
-  const exportButton = iconButton("download", "Download the transcript", () => {
-    const lines = [...timeline.querySelectorAll("li")].map((li) => {
-      const time = li.querySelector("time")?.textContent ?? ""
-      const body = li.querySelector("div")?.textContent ?? ""
-      return `${time}  ${body}`.trim()
-    })
-    const run = findRun()!
-    const text = [`# ${agent.label} on ${run.hostname ?? "an unnamed machine"}`, `Run ${run.id}, ${run.status}`, "", ...lines, ""].join("\n")
-    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }))
-    const a = h("a", { href: url, download: `transcript-${run.id.slice(0, 8)}.txt` })
-    a.click()
-    URL.revokeObjectURL(url)
+  const exportButton = button("Text transcript (.txt)", {
+    icon: "download",
+    onclick: () => {
+      const lines = [...timeline.querySelectorAll("li")].map((li) => {
+        const time = li.querySelector("time")?.textContent ?? ""
+        const body = li.querySelector("div")?.textContent ?? ""
+        return `${time}  ${body}`.trim()
+      })
+      const run = findRun()!
+      const text = [`# ${agent.label} on ${run.hostname ?? "an unnamed machine"}`, `Run ${run.id}, ${run.status}`, "", ...lines, ""].join("\n")
+      const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }))
+      const a = h("a", { href: url, download: `transcript-${run.id.slice(0, 8)}.txt` })
+      a.click()
+      URL.revokeObjectURL(url)
+    },
+  })
+  // The complete stored event history as NDJSON: every event in sequence
+  // order with timestamps, types and usage, not just the rendered lines.
+  const exportNdjson = button("Full history (.ndjson)", {
+    icon: "download",
+    onclick: async () => {
+      try {
+        const res = await fetch(`/api/agents/${agentId}/runs/${runId}/export`, { credentials: "same-origin" })
+        if (!res.ok) throw new ApiError(res.status, `The server answered ${res.status}.`)
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const disposition = res.headers.get("content-disposition") ?? ""
+        const named = disposition.match(/filename="([^"]+)"/)?.[1] ?? `run-${runId.slice(0, 8)}.ndjson`
+        const a = h("a", { href: url, download: named })
+        a.click()
+        URL.revokeObjectURL(url)
+      } catch (err) {
+        toast(err instanceof ApiError ? err.message : String(err))
+      }
+    },
   })
   let lastSeq = 0
   let cost = 0
@@ -134,7 +157,7 @@ export async function renderRun(main: HTMLElement, agentId: string, runId: strin
           h("h1", {}, run.hostname ?? "Unnamed machine"),
           statusLine,
         ),
-        h("div", { class: "inline" }, exportButton, live && !run.kill_requested ? stop : null),
+        h("div", { class: "inline" }, exportButton, exportNdjson, live && !run.kill_requested ? stop : null),
       ),
     )
     replace(
