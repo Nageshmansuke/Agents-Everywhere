@@ -228,6 +228,8 @@ export async function renderDetail(main: HTMLElement, id: string): Promise<() =>
       totalRuns = res.total
     } else if (typeof agent.total_runs === "number") {
       totalRuns = agent.total_runs
+    } else {
+      totalRuns = agent.runs.filter((r) => r.status !== "pending").length
     }
     hasMore = res.has_more
     nextCursor = res.next_cursor
