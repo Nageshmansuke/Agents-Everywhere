@@ -136,6 +136,7 @@ export async function startControl(options: ControlOptions): Promise<RunningCont
       "/api/agents/:id/install-command": { POST: adminOnly((req, p) => admin.installCommand(req, p.id)) },
       "/api/agents/:id/revoke": { POST: adminOnly((req, p) => admin.revoke(req, p.id)) },
       "/api/agents/:id/runs/:runId/events": { GET: adminOnly((req, p) => admin.runEvents(req, p.id, p.runId)) },
+      "/api/agents/:id/runs/:runId/export": { GET: adminOnly((req, p) => admin.runExport(req, p.id, p.runId)) },
       "/api/agents/:id/runs/:runId/messages": { POST: adminOnly((req, p) => admin.sendMessage(req, p.id, p.runId)) },
       "/api/agents/:id/runs/:runId/kill": { POST: adminOnly((req, p) => admin.killRun(req, p.id, p.runId)) },
       "/api/agents/:id/permission-requests": { GET: adminOnly((req, p) => admin.permissionRequests(req, p.id)) },

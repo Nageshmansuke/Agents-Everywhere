@@ -490,6 +490,13 @@ export class Store {
       .all(runId, afterSeq, limit)
   }
 
+  /** Highest stored sequence for a run; 0 when the run has no events yet. */
+  maxSeq(runId: string): number {
+    return this.db
+      .query<{ m: number }, [string]>("SELECT COALESCE(MAX(seq),0) AS m FROM events WHERE run_id = ?")
+      .get(runId)!.m
+  }
+
   /** Chat messages for a run after the one the runner last delivered. A cursor
    *  that is not one of this run's own events is ignored, never trusted. */
   messagesAfter(runId: string, afterEventId: string | null): EventRow[] {

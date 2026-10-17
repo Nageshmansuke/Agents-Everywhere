@@ -468,6 +468,80 @@ export class AdminApi {
     )
   }
 
+  /**
+   * Complete machine-readable export of one run as NDJSON: a metadata line
+   * followed by one stored event per line in sequence order. The upper
+   * sequence boundary (`through_seq`) is fixed before reading, so a live run
+   * yields a finite snapshot; rows past it are never written. Rows are read
+   * in bounded pages and streamed, never held whole in memory.
+   *
+   * Format `agents-everywhere.run-export/1`: every line, header and records
+   * alike, carries `format`, `agent_id` and `run_id` so each record is
+   * self-describing. Records additionally carry `seq`, `id`, `event_type`,
+   * `created_at`, verbatim `payload`, and usage fields (`tokens_in`,
+   * `tokens_out`, `cost_usd`, where `null` cost means unknown, not zero).
+   * Payloads are preserved verbatim and may contain sensitive task data;
+   * metadata never carries credentials or tokens.
+   */
+  runExport = async (_req: Request, id: string, runId: string): Promise<Response> => {
+    this.agentOr404(id)
+    const run = this.runOr404(id, runId)
+    const throughSeq = this.store.maxSeq(runId)
+    const exportedAt = new Date().toISOString()
+    const meta = {
+      format: "agents-everywhere.run-export/1",
+      agent_id: id,
+      run_id: runId,
+      exported_at: exportedAt,
+      through_seq: throughSeq,
+      run_status_at_export: run.status,
+      note: "Finite snapshot: events after through_seq are excluded. Payloads are preserved verbatim and may contain sensitive task data.",
+    }
+    const filename = `run-${runId.slice(0, 8)}-through-${throughSeq}.ndjson`
+    let cursor = 0
+    let first = true
+    const store = this.store
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (first) {
+          first = false
+          controller.enqueue(`${JSON.stringify(meta)}\n`)
+        }
+        const rows = store.events(runId, cursor, EVENTS_PAGE)
+        for (const e of rows) {
+          if (e.seq > throughSeq) {
+            controller.close()
+            return
+          }
+          cursor = Math.max(cursor, e.seq)
+          controller.enqueue(
+            `${JSON.stringify({
+              format: "agents-everywhere.run-export/1",
+              agent_id: id,
+              run_id: runId,
+              seq: e.seq,
+              id: e.id,
+              event_type: e.event_type,
+              created_at: e.created_at,
+              payload: parseJson(e.payload, {}),
+              tokens_in: e.tokens_in,
+              tokens_out: e.tokens_out,
+              cost_usd: e.cost_usd,
+            })}\n`,
+          )
+        }
+        if (rows.length < EVENTS_PAGE || cursor >= throughSeq) controller.close()
+      },
+    })
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
+      },
+    })
+  }
+
   /** Delivered on the run's next heartbeat, into the same session, as a follow-up turn. */
   sendMessage = async (req: Request, id: string, runId: string): Promise<Response> => {
     this.agentOr404(id)
