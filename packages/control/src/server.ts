@@ -126,6 +126,7 @@ export async function startControl(options: ControlOptions): Promise<RunningCont
       "/api/models": { GET: adminOnly(models.list) },
       "/api/config/global": { GET: adminOnly(admin.getGlobalConfig), PUT: adminOnly(admin.saveGlobalConfig) },
       "/api/agents": { GET: adminOnly(admin.listAgents), POST: adminOnly(admin.createAgent) },
+      "/api/fleet/metrics": { GET: adminOnly(admin.fleetMetrics) },
       "/api/agents/:id": {
         GET: adminOnly((req, p) => admin.getAgent(req, p.id)),
         PATCH: adminOnly((req, p) => admin.updateAgent(req, p.id)),

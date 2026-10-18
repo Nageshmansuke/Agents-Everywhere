@@ -88,6 +88,26 @@ export interface AgentSummary {
   pending_permission_requests: number
 }
 
+export type FleetRange = "24h" | "7d" | "30d"
+
+/** Null spend means no cost was recorded, which is not the same as zero. */
+export interface FleetMetrics {
+  range: FleetRange
+  time_basis: "UTC"
+  from: string
+  to: string
+  spend_usd: number | null
+  cost_coverage: { priced_reports: number; unpriced_reports: number }
+  runs_started: number
+  median_run_ms: number | null
+  completed_runs: number
+  refused_actions: number
+  current: { agents_running: number; awaiting_you: number }
+  agents: Array<{ id: string; label: string; spend_usd: number | null; runs: number }>
+  other: { agents: number; spend_usd: number | null; runs: number } | null
+  daily: Array<{ date: string; spend_usd: number | null; runs: number }>
+}
+
 export interface Agent extends AgentSummary {
   task: string
   location_label: string | null

@@ -22,6 +22,7 @@ import {
 } from "@agents-everywhere/harness/protocol"
 import { createBootstrapToken, seal, type Keys } from "./crypto"
 import { HttpError, json, parseJson, readBody } from "./http"
+import { DEFAULT_FLEET_RANGE, FLEET_RANGES, fleetMetrics, type FleetRange } from "./metrics"
 import {
   dedupeRules,
   defaultDenyRules,
@@ -293,6 +294,14 @@ export class AdminApi {
         pending_permission_requests: a.pending_requests,
       })),
     )
+
+  /** Aggregates only: sums, counts and agent names, never payloads or tool inputs. */
+  fleetMetrics = async (req: Request): Promise<Response> => {
+    const range = new URL(req.url).searchParams.get("range") ?? DEFAULT_FLEET_RANGE
+    if (!FLEET_RANGES.includes(range as FleetRange))
+      throw new HttpError(400, `range must be one of ${FLEET_RANGES.join(", ")}`)
+    return json(fleetMetrics(this.store, range as FleetRange))
+  }
 
   createAgent = async (req: Request): Promise<Response> => {
     const body = await readBody(req, CreateAgent, MAX_ADMIN_BODY_BYTES)

@@ -217,6 +217,22 @@ describe("stopping", () => {
   })
 })
 
+describe("fleet metrics API", () => {
+  test("is admin-only, validates the range and returns aggregates only", async () => {
+    expect((await fetch(`${base}/api/fleet/metrics`)).status).toBe(401)
+    expect((await admin("GET", "/api/fleet/metrics?range=1y")).status).toBe(400)
+    const res = await admin("GET", "/api/fleet/metrics")
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as any
+    expect(body.range).toBe("7d")
+    expect(body.time_basis).toBe("UTC")
+    expect(body.daily.length).toBe(7)
+    expect(Object.keys(body.current)).toEqual(["agents_running", "awaiting_you"])
+    for (const a of body.agents) expect(Object.keys(a).sort()).toEqual(["id", "label", "runs", "spend_usd"])
+    for (const range of ["24h", "30d"]) expect((await admin("GET", `/api/fleet/metrics?range=${range}`)).status).toBe(200)
+  })
+})
+
 describe("listening safely", () => {
   test("refuses to listen beyond this machine without TLS unless told it is behind a proxy", () => {
     expect(() => resolveOptions({ hostname: "0.0.0.0", publicUrl: "https://x.example" }, () => {})).toThrow(
