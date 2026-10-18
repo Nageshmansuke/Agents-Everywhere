@@ -824,7 +824,7 @@ pre.well {
 }
 .day-bar:hover,
 .day-bar[aria-current="true"] {
-  background: var(--bg-raised);
+  background-color: var(--bg-raised);
 }
 .day-bar-fill {
   display: block;
@@ -836,9 +836,13 @@ pre.well {
 .day-bar[aria-current="true"] .day-bar-fill {
   background: var(--accent-hover);
 }
-/* Activity without a recorded cost: a hatch at the baseline, never a zero bar. */
+/* Activity without a recorded cost: a hatch at the baseline, never a zero bar.
+   Image longhands only, so the hover and current highlight colour stays beneath it. */
 .day-bar[data-nocost] {
-  background: repeating-linear-gradient(135deg, transparent 0 3px, var(--border-strong) 3px 4px) bottom / 100% 6px no-repeat;
+  background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--border-strong) 3px 4px);
+  background-position: bottom;
+  background-size: 100% 6px;
+  background-repeat: no-repeat;
 }
 .day-labels {
   padding-top: var(--space-xs);
