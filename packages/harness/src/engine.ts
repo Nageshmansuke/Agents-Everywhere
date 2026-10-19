@@ -242,3 +242,26 @@ export function getFreePort(): Promise<number> {
     })
   })
 }
+
+/**
+ * Sends an abort request to stop ongoing generation in the session.
+ * Returns an explicit status and does not represent failure as success.
+ */
+export async function abortSession(
+  baseUrl: string,
+  authHeader: string,
+  sessionId: string,
+): Promise<{ ok: boolean; status?: number; error?: string }> {
+  try {
+    const res = await request(
+      "POST",
+      `${baseUrl}/session/${sessionId}/abort`,
+      undefined,
+      { Authorization: authHeader },
+      3000,
+    )
+    return { ok: res.status >= 200 && res.status < 300, status: res.status }
+  } catch (err) {
+    return { ok: false, error: String(err) }
+  }
+}

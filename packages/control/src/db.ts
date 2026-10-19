@@ -116,6 +116,15 @@ const MIGRATIONS: string[] = [
   `
   CREATE INDEX IF NOT EXISTS runs_agent_pagination ON runs(agent_id, created_at DESC, id DESC);
   `,
+  `
+  ALTER TABLE agents ADD COLUMN spend_limit_usd REAL;
+  ALTER TABLE runs ADD COLUMN spend_limit_usd REAL;
+  `,
+  `
+  ALTER TABLE events ADD COLUMN client_event_id TEXT;
+  CREATE UNIQUE INDEX idx_events_run_client_event_id ON events (run_id, client_event_id);
+  ALTER TABLE runs ADD COLUMN kill_reason TEXT;
+  `,
 ]
 
 export function openDatabase(file: string): Database {

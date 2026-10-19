@@ -6,6 +6,7 @@
  */
 import { log } from "./log"
 import {
+  abortSession,
   createSession,
   DECISION_REPLIES,
   unattendedRefusal,
@@ -19,6 +20,7 @@ import {
 } from "./engine"
 import { request } from "./http"
 import type { Usage } from "./protocol"
+import { terminateChildProcess } from "./process"
 import {
   createTranscript,
   describeToolCall,
@@ -29,6 +31,8 @@ import {
   type TranscriptEntry,
 } from "./transcript"
 import type { ChildProcess } from "child_process"
+
+import type { BudgetHaltReason, SpendingTracker } from "./spending"
 
 // How long a session stays open after going idle before the run is reported
 // finished. Long enough to catch a message someone is already typing when the
@@ -42,6 +46,7 @@ export interface RunResult {
   error?: string
   /** Went quiet without finishing: nothing happened, or it ended waiting on a person. */
   idle?: boolean
+  budgetHalt?: BudgetHaltReason
 }
 
 export interface Ask {
@@ -62,7 +67,7 @@ export interface Denial {
 export interface HeadlessHooks {
   onLine(line: string): void
   onSpawn(child: ChildProcess): void
-  onStep(entry: TranscriptEntry, usage?: Usage): void
+  onStep(entry: TranscriptEntry, usage?: Usage, eventId?: string): void
   onReady(session: SessionHandle): void
   /** A request-mode ask: "escalated" leaves the engine's request open. */
   onAsked(ask: Ask): Promise<"escalated" | "denied">
@@ -76,9 +81,11 @@ export async function runHeadless(
   modelProvider: string,
   modelName: string,
   hooks: HeadlessHooks,
+  spending?: SpendingTracker,
+  engineStarter: typeof startEngineServer = startEngineServer,
 ): Promise<RunResult> {
   const { onLine } = hooks
-  const { child, baseUrl, password } = await startEngineServer(cwd, onLine)
+  const { child, baseUrl, password } = await engineStarter(cwd, onLine)
   hooks.onSpawn(child)
   const authHeader = engineAuthHeader(password)
   const sessionId = await createSession(baseUrl, authHeader)
@@ -125,6 +132,15 @@ export async function runHeadless(
       idleTimer = setTimeout(finishIfStillIdle, CHAT_IDLE_GRACE_MS)
       return
     }
+    if (spending?.haltInfo) {
+      resolveFinished({
+        success: false,
+        exitCode: 0,
+        error: spending.haltInfo.message,
+        budgetHalt: spending.haltInfo.reason,
+      })
+      return
+    }
     resolveFinished({
       success: !lastError,
       exitCode: lastError ? 1 : 0,
@@ -143,6 +159,15 @@ export async function runHeadless(
   // grace timer. This is also what makes a kill take seconds.
   child.on("exit", (code, signal) => {
     clearTimeout(idleTimer)
+    if (spending?.haltInfo) {
+      resolveFinished({
+        success: false,
+        exitCode: code,
+        error: spending.haltInfo.message,
+        budgetHalt: spending.haltInfo.reason,
+      })
+      return
+    }
     resolveFinished({
       success: false,
       exitCode: code,
@@ -166,11 +191,35 @@ export async function runHeadless(
       const part = props.part
       if (part.type === "step-finish") {
         sawProgress = true
+        if (spending) spending.finishTurn()
         const tokens = tokenCounts(part.tokens)
+        const stepId = typeof part.id === "string" ? part.id : undefined
         hooks.onStep(
           { kind: "usage", message: "Step finished" },
           { tokensIn: tokens.in, tokensOut: tokens.out, costUsd: typeof part.cost === "number" ? part.cost : null },
+          stepId,
         )
+        if (spending) {
+          const halt = spending.recordStepUsage(part)
+          if (halt) {
+            onLine(`[budget] Stopping run: ${halt.message}`)
+            void abortSession(baseUrl, authHeader, sessionId).then((abortRes) => {
+              if (!abortRes.ok) {
+                log(`Session abort request did not succeed: ${abortRes.error || `HTTP ${abortRes.status}`}`)
+              }
+            })
+            clearTimeout(idleTimer)
+            events.close()
+            terminateChildProcess(child)
+            resolveFinished({
+              success: false,
+              exitCode: 0,
+              error: halt.message,
+              budgetHalt: halt.reason,
+            })
+            return
+          }
+        }
       } else if (
         part.type === "tool" &&
         part.state &&
@@ -242,12 +291,21 @@ export async function runHeadless(
 
   hooks.onReady({
     feedMessage: async (message) => {
+      if (spending) {
+        const admission = spending.canAdmitTurn()
+        if (!admission.ok) {
+          onLine(`[chat] Rejected chat message due to spending guardrails: ${admission.halt.message}`)
+          return false
+        }
+        spending.startTurn()
+      }
       clearTimeout(idleTimer) // a new message means the chat is still active
       onLine(`[chat] ${message}`)
       try {
         await sendMessage(baseUrl, authHeader, sessionId, message, modelRef)
         return true
       } catch (err) {
+        if (spending) spending.finishTurn()
         onLine(`Failed to deliver chat message: ${err}`)
         return false
       }
@@ -270,12 +328,40 @@ export async function runHeadless(
     },
     hasPendingEscalations: () => pendingEscalations.size > 0,
     addContext: async (text) => {
+      if (spending) {
+        const admission = spending.canAdmitTurn()
+        if (!admission.ok) {
+          onLine(`[budget] Context turn not admitted: ${admission.halt.message}`)
+          return
+        }
+        spending.startTurn()
+      }
       clearTimeout(idleTimer)
-      await sendMessage(baseUrl, authHeader, sessionId, text, modelRef).catch((err) =>
-        onLine(`Failed to add context to the session: ${err}`),
-      )
+      try {
+        await sendMessage(baseUrl, authHeader, sessionId, text, modelRef)
+      } catch (err) {
+        if (spending) spending.finishTurn()
+        onLine(`Failed to add context to the session: ${err}`)
+      }
     },
   })
+
+  if (spending) {
+    const admission = spending.canAdmitTurn()
+    if (!admission.ok) {
+      onLine(`[budget] Initial prompt not admitted: ${admission.halt.message}`)
+      clearTimeout(idleTimer)
+      events.close()
+      terminateChildProcess(child)
+      return {
+        success: false,
+        exitCode: 0,
+        error: admission.halt.message,
+        budgetHalt: admission.halt.reason,
+      }
+    }
+    spending.startTurn()
+  }
 
   await sendMessage(baseUrl, authHeader, sessionId, task, modelRef)
   armIdleTimeout() // covers a task finishing before a busy status is ever observed
@@ -283,6 +369,6 @@ export async function runHeadless(
   const result = await finished
   clearTimeout(idleTimer)
   events.close()
-  child.kill("SIGTERM")
+  terminateChildProcess(child)
   return result
 }

@@ -16,6 +16,8 @@ const STATUS: Record<string, [string, string]> = {
   idle_timeout: ["Went quiet", "warning"],
   failed: ["Failed", "error"],
   killed: ["Stopped", "error"],
+  budget_exceeded: ["Budget Exceeded", "warning"],
+  unpriced_usage_halt: ["Unpriced Usage Halt", "warning"],
 }
 
 /** A run's state: a tone dot and a mono label. */
