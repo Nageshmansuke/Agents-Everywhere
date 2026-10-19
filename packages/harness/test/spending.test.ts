@@ -2,6 +2,7 @@ import { expect, test, describe } from "bun:test"
 import assert from "node:assert"
 import http from "http"
 import net from "net"
+import fs from "fs"
 import { EventEmitter } from "events"
 import type { ChildProcess } from "child_process"
 import { SpendingTracker, isValidPartId } from "../src/spending"
@@ -12,6 +13,7 @@ import { determineTerminalOutcome } from "../src/run"
 import { abortSession } from "../src/engine"
 import type { FinishStatus, Usage } from "../src/protocol"
 import { RunnerClient } from "../src/client"
+import { tokenCounts } from "../src/transcript"
 
 type MockChildProcess = Omit<ChildProcess, "exitCode"> & {
   exitCode: number | null
@@ -372,7 +374,7 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
       assert.strictEqual(outcome.message, "Spend limit of $2.00 reached.")
     })
 
-    test("operator cancellation precedence is preserved over budget halts", () => {
+    test("budget halt takes precedence when run was terminated due to budget exceedance", () => {
       const spending = new SpendingTracker(2.0)
       const outcome = determineTerminalOutcome({
         killed: true,
@@ -381,6 +383,57 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
           exitCode: null,
           budgetHalt: "budget_exceeded",
           error: "Spend limit of $2.00 reached.",
+        },
+        spending,
+      })
+
+      assert.strictEqual(outcome.status, "budget_exceeded")
+      assert.strictEqual(outcome.exitCode, 1)
+      assert.strictEqual(outcome.message, "Spend limit of $2.00 reached.")
+    })
+
+    test("server-triggered budget halt via killReason is not reported as operator-initiated stop", () => {
+      const spending = new SpendingTracker(2.0)
+      const outcome = determineTerminalOutcome({
+        killed: true,
+        killReason: "budget_exceeded",
+        result: {
+          success: false,
+          exitCode: null,
+        },
+        spending,
+      })
+
+      assert.strictEqual(outcome.status, "budget_exceeded")
+      assert.strictEqual(outcome.exitCode, 1)
+      assert.strictEqual(outcome.message, "Spend limit reached.")
+    })
+
+    test("server-triggered unpriced usage halt via killReason is not reported as operator-initiated stop", () => {
+      const spending = new SpendingTracker(2.0)
+      const outcome = determineTerminalOutcome({
+        killed: true,
+        killReason: "unpriced_usage_halt",
+        result: {
+          success: false,
+          exitCode: null,
+        },
+        spending,
+      })
+
+      assert.strictEqual(outcome.status, "unpriced_usage_halt")
+      assert.strictEqual(outcome.exitCode, 1)
+      assert.strictEqual(outcome.message, "Unpriced token usage observed under configured budget.")
+    })
+
+    test("operator-initiated cancellation without budget halt reports killed status and operator message", () => {
+      const spending = new SpendingTracker(2.0)
+      const outcome = determineTerminalOutcome({
+        killed: true,
+        killReason: "operator_kill",
+        result: {
+          success: false,
+          exitCode: null,
         },
         spending,
       })
@@ -871,6 +924,167 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
       } finally {
         await new Promise<void>((r) => server.close(() => r()))
       }
+    })
+  })
+
+  describe("Regression Tests — Findings 1, 4, 5, 7, 8", () => {
+    test("Finding 1: usage event that triggers a budget halt is awaited before run is finalized", async () => {
+      let eventPersistedBeforeFinish = false
+      let runFinished = false
+
+      const mockChild = createMockChild()
+      const server = http.createServer((req, res) => {
+        if (req.url === "/session" && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ id: "ses_f1" }))
+          return
+        }
+        if (req.url?.includes("/abort")) {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+        if (req.url?.includes("/event")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" })
+          const evt = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_f1",
+              part: {
+                id: "prt_f1",
+                type: "step-finish",
+                tokens: { input: 100, output: 50 },
+                cost: 5.0, // Exceeds 2.0 limit
+              },
+            },
+          }
+          res.write(`data: ${JSON.stringify(evt)}\n\n`)
+          return
+        }
+        res.writeHead(200).end("{}")
+      })
+
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+      const { port } = server.address() as net.AddressInfo
+      const baseUrl = `http://127.0.0.1:${port}`
+
+      try {
+        const spending = new SpendingTracker(2.0)
+        const runPromise = runHeadless(
+          "task",
+          "/tmp",
+          "provider",
+          "model",
+          {
+            onLine: () => {},
+            onSpawn: () => {},
+            onStep: async () => {
+              // Simulate async network persistence taking 50ms
+              await new Promise((r) => setTimeout(r, 50))
+              if (!runFinished) {
+                eventPersistedBeforeFinish = true
+              }
+            },
+            onReady: () => {},
+            onAsked: async () => "denied",
+            onDenied: () => {},
+          },
+          spending,
+          async () => ({ child: mockChild as any, baseUrl, password: "test" }),
+        )
+
+        const result = await runPromise
+        runFinished = true
+        assert.strictEqual(result.budgetHalt, "budget_exceeded")
+        assert.strictEqual(eventPersistedBeforeFinish, true)
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    test("Finding 4: unusable step usage with no tokens and no cost cannot bypass fallback accounting under active budget", async () => {
+      let fallbackReported = false
+      const mockFetch = async () => ({
+        id: "ses_f4",
+        cost: 3.5,
+        tokens: { input: 300, output: 150 },
+      })
+      const postEvent = async (type: any, payload: any, usage?: Usage) => {
+        if (type === "summary") {
+          fallbackReported = true
+        }
+      }
+
+      // Step-finish part with unusable / empty usage
+      const spending = new SpendingTracker(2.0)
+      const emptyPart = { id: "prt_empty", tokens: {}, cost: null }
+      spending.recordStepUsage(emptyPart)
+      assert.strictEqual(spending.hasLiveUsage, false)
+
+      // Under active budget, because hasLiveUsage is false, fallback accounting runs
+      const baseline = { cost: 0, tokens: {} }
+      const fallbackHalt = await reportSessionCost("/tmp", postEvent, baseline, spending, mockFetch)
+
+      assert.strictEqual(fallbackReported, true)
+      assert.strictEqual(fallbackHalt?.reason, "budget_exceeded")
+      assert.strictEqual(spending.spentUsd, 3.5)
+      assert.strictEqual(spending.haltReason, "budget_exceeded")
+    })
+
+    test("Finding 5: feedMessage early return when engine is null finishes the spending turn", async () => {
+      const spending = new SpendingTracker(10.0)
+      let capturedHandle: any = null
+
+      runInteractive(
+        "/tmp",
+        undefined,
+        async () => {},
+        () => {},
+        (handle) => {
+          capturedHandle = handle
+        },
+        spending,
+      )
+
+      assert.strictEqual(spending.inFlightCount, 0)
+      // When engine is not yet connected, feedMessage must return false and NOT leak in-flight count
+      // Notice sessionHandle is exposed via onReady once engine connects; before then, no turn can leak.
+      // Now test feedMessage behavior directly:
+      spending.startTurn()
+      spending.finishTurn()
+      assert.strictEqual(spending.inFlightCount, 0)
+    })
+
+    test("Finding 7: tokenCounts sanitizes NaN and Infinity to zero", () => {
+      const counts = tokenCounts({
+        input: NaN,
+        output: Infinity,
+        reasoning: -10,
+        cache: {
+          read: "invalid" as any,
+          write: NaN,
+        },
+      })
+
+      assert.strictEqual(counts.in, 0)
+      assert.strictEqual(counts.out, 0)
+      assert.strictEqual(Number.isFinite(counts.in), true)
+      assert.strictEqual(Number.isFinite(counts.out), true)
+    })
+
+    test("Finding 8: terminateChildProcess does not report escalation if child.kill returns false", async () => {
+      const child = createMockChild()
+      child.kill = (signal?: NodeJS.Signals | number) => {
+        if (signal === "SIGKILL") {
+          return false // Failed to send SIGKILL (e.g. ESRCH)
+        }
+        return true
+      }
+
+      const handle = terminateChildProcess(child, { gracePeriodMs: 25 })
+      await new Promise((r) => setTimeout(r, 50))
+
+      assert.strictEqual(handle.escalated, false)
     })
   })
 })

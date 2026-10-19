@@ -182,6 +182,7 @@ export class RuntimeApi {
 
     const response: HeartbeatResponse = {
       kill: run.kill_requested_at !== null,
+      kill_reason: run.kill_reason,
       status,
       messages: this.store.messagesAfter(run.id, body.after_event_id ?? null).map((e) => ({
         id: e.id,

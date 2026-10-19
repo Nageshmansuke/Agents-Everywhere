@@ -28,14 +28,17 @@ export class EventConflictError extends HttpError {
   }
 }
 
-export function arePayloadsEquivalent(a: unknown, b: unknown): boolean {
+export const MAX_PAYLOAD_EQUIVALENCE_DEPTH = 32
+
+export function arePayloadsEquivalent(a: unknown, b: unknown, depth = 0): boolean {
+  if (depth > MAX_PAYLOAD_EQUIVALENCE_DEPTH) return false
   if (a === b) return true
   if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false
   if (Array.isArray(a) !== Array.isArray(b)) return false
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false
     for (let i = 0; i < a.length; i++) {
-      if (!arePayloadsEquivalent(a[i], b[i])) return false
+      if (!arePayloadsEquivalent(a[i], b[i], depth + 1)) return false
     }
     return true
   }
@@ -46,7 +49,7 @@ export function arePayloadsEquivalent(a: unknown, b: unknown): boolean {
   if (keysA.length !== keysB.length) return false
   for (const key of keysA) {
     if (!Object.prototype.hasOwnProperty.call(objB, key)) return false
-    if (!arePayloadsEquivalent(objA[key], objB[key])) return false
+    if (!arePayloadsEquivalent(objA[key], objB[key], depth + 1)) return false
   }
   return true
 }
@@ -600,8 +603,10 @@ export class Store {
     const id = uuid()
     const sanitizedCost =
       typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) ? Math.max(0, usage.costUsd) : null
-    const tokensIn = Math.max(0, usage.tokensIn ?? 0)
-    const tokensOut = Math.max(0, usage.tokensOut ?? 0)
+    const sanitizeTokens = (val: unknown): number =>
+      typeof val === "number" && Number.isFinite(val) ? Math.max(0, Math.floor(val)) : 0
+    const tokensIn = sanitizeTokens(usage.tokensIn)
+    const tokensOut = sanitizeTokens(usage.tokensOut)
     const now = nowIso()
 
     if (clientEventId) {

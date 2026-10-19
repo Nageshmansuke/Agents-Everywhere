@@ -203,7 +203,10 @@ export function runInteractive(
           }
           spending.startTurn()
         }
-        if (!engine) return false
+        if (!engine) {
+          if (spending) spending.finishTurn()
+          return false
+        }
         try {
           const sessionId = await findActiveSession()
           if (!sessionId) {
@@ -279,9 +282,13 @@ export function runInteractive(
           })
         }
         if (event.type === "message.part.updated" && part && part.type === "step-finish") {
-          sawLiveUsage = true
-          if (spending) spending.finishTurn()
           const tokens = tokenCounts(part.tokens)
+          const hasUsableUsage =
+            (typeof part.cost === "number" && Number.isFinite(part.cost)) || tokens.in > 0 || tokens.out > 0
+          if (hasUsableUsage) {
+            sawLiveUsage = true
+          }
+          if (spending) spending.finishTurn()
           const stepId = typeof part.id === "string" ? part.id : undefined
           void postEvent(
             "step",
@@ -346,7 +353,9 @@ export function runInteractive(
       child.on("close", async (code) => {
         cancelled = true
         if (events) events.close()
-        if (!sawLiveUsage) {
+        const needsFallback =
+          !sawLiveUsage || (Boolean(spending && spending.limitUsd !== null) && !spending?.hasLiveUsage)
+        if (needsFallback && !interactiveHalt && !spending?.haltInfo) {
           const fallbackHalt = await reportSessionCost(cwd, postEvent, baseline, spending, fetchSession)
           if (fallbackHalt) interactiveHalt = fallbackHalt
         }

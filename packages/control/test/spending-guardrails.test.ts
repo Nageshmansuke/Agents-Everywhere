@@ -4,7 +4,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { openDatabase } from "../src/db"
-import { Store } from "../src/store"
+import { Store, arePayloadsEquivalent, MAX_PAYLOAD_EQUIVALENCE_DEPTH } from "../src/store"
 import { AGENT_DEFAULT_FIELDS, parseGlobalYaml } from "../src/configuration"
 import { createBootstrapToken, loadKeys } from "../src/crypto"
 import { RuntimeApi } from "../src/runtime"
@@ -2003,6 +2003,80 @@ defaults:
         expect(store.getRun(runId)?.status).toBe("succeeded")
         db.close()
       })
+    })
+  })
+
+  describe("Regression Tests — Findings 6 and 7", () => {
+    test("Finding 6: deeply nested payloads beyond MAX_PAYLOAD_EQUIVALENCE_DEPTH do not exhaust stack and return false", () => {
+      // Create deeply nested object beyond depth 32
+      let deepA: any = { leaf: "value" }
+      let deepB: any = { leaf: "value" }
+      for (let i = 0; i < 50; i++) {
+        deepA = { nested: deepA }
+        deepB = { nested: deepB }
+      }
+
+      // Should return false safely and not throw RangeError: Maximum call stack size exceeded
+      expect(MAX_PAYLOAD_EQUIVALENCE_DEPTH).toBe(32)
+      expect(arePayloadsEquivalent(deepA, deepB)).toBe(false)
+
+      // Within depth limit, identical structure is equivalent
+      let shallowA: any = { leaf: "value" }
+      let shallowB: any = { leaf: "value" }
+      for (let i = 0; i < 10; i++) {
+        shallowA = { nested: shallowA }
+        shallowB = { nested: shallowB }
+      }
+      expect(arePayloadsEquivalent(shallowA, shallowB)).toBe(true)
+    })
+
+    test("Finding 7: token counts with NaN or Infinity are sanitized to 0 in storage", () => {
+      const db = openDatabase(dbFile)
+      const store = new Store(db)
+      const agentId = store.createAgent(
+        {
+          label: "test-agent",
+          os_shell: "linux_bash",
+          location_label: null,
+          task: "task",
+          model_provider: "anthropic",
+          model_name: "claude",
+          llm_api_key_sealed: null,
+          interactive: false,
+          permission_mode: "strict",
+          permission_request_timeout_seconds: 900,
+          declared_env_vars: [],
+          spend_limit_usd: null,
+        },
+        [],
+        [],
+      )
+      const runId = store.createPendingRun(agentId)
+      store.claimPendingRun(runId, agentId, "host", {})
+
+      // Insert event with NaN and Infinity token usage
+      const added = store.addEvent(
+        runId,
+        "step",
+        { message: "test usage" },
+        { tokensIn: NaN, tokensOut: Infinity, costUsd: 0.05 },
+        "client_evt_nan_inf",
+      )
+
+      expect(added.tokens_in).toBe(0)
+      expect(added.tokens_out).toBe(0)
+      expect(Number.isFinite(added.tokens_in)).toBe(true)
+      expect(Number.isFinite(added.tokens_out)).toBe(true)
+
+      // Query raw database row to verify SQLite storage values
+      const row = db.query<{ tokens_in: number; tokens_out: number }, [string]>(
+        "SELECT tokens_in, tokens_out FROM events WHERE id = ?",
+      ).get(added.id)!
+
+      expect(row.tokens_in).toBe(0)
+      expect(row.tokens_out).toBe(0)
+
+      db.close()
     })
   })
 })

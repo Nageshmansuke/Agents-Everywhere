@@ -67,7 +67,7 @@ export interface Denial {
 export interface HeadlessHooks {
   onLine(line: string): void
   onSpawn(child: ChildProcess): void
-  onStep(entry: TranscriptEntry, usage?: Usage, eventId?: string): void
+  onStep(entry: TranscriptEntry, usage?: Usage, eventId?: string): Promise<unknown> | void
   onReady(session: SessionHandle): void
   /** A request-mode ask: "escalated" leaves the engine's request open. */
   onAsked(ask: Ask): Promise<"escalated" | "denied">
@@ -194,7 +194,7 @@ export async function runHeadless(
         if (spending) spending.finishTurn()
         const tokens = tokenCounts(part.tokens)
         const stepId = typeof part.id === "string" ? part.id : undefined
-        hooks.onStep(
+        const stepPost = hooks.onStep(
           { kind: "usage", message: "Step finished" },
           { tokensIn: tokens.in, tokensOut: tokens.out, costUsd: typeof part.cost === "number" ? part.cost : null },
           stepId,
@@ -203,20 +203,25 @@ export async function runHeadless(
           const halt = spending.recordStepUsage(part)
           if (halt) {
             onLine(`[budget] Stopping run: ${halt.message}`)
-            void abortSession(baseUrl, authHeader, sessionId).then((abortRes) => {
-              if (!abortRes.ok) {
-                log(`Session abort request did not succeed: ${abortRes.error || `HTTP ${abortRes.status}`}`)
+            void (async () => {
+              if (stepPost && typeof (stepPost as Promise<unknown>).then === "function") {
+                await (stepPost as Promise<unknown>).catch(() => {})
               }
-            })
-            clearTimeout(idleTimer)
-            events.close()
-            terminateChildProcess(child)
-            resolveFinished({
-              success: false,
-              exitCode: 0,
-              error: halt.message,
-              budgetHalt: halt.reason,
-            })
+              void abortSession(baseUrl, authHeader, sessionId).then((abortRes) => {
+                if (!abortRes.ok) {
+                  log(`Session abort request did not succeed: ${abortRes.error || `HTTP ${abortRes.status}`}`)
+                }
+              })
+              clearTimeout(idleTimer)
+              events.close()
+              terminateChildProcess(child)
+              resolveFinished({
+                success: false,
+                exitCode: 0,
+                error: halt.message,
+                budgetHalt: halt.reason,
+              })
+            })()
             return
           }
         }

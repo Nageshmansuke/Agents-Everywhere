@@ -83,9 +83,11 @@ export function terminateChildProcess(
     }
     // Verify target process matches the original child PID before signalling
     if (child.pid === pid) {
-      didEscalate = true
       try {
-        child.kill("SIGKILL")
+        const killed = child.kill("SIGKILL")
+        if (killed !== false) {
+          didEscalate = true
+        }
       } catch {
         /* best-effort kill; process may have already exited */
       }

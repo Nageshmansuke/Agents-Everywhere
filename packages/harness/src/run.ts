@@ -34,7 +34,7 @@ import {
   type Usage,
 } from "./protocol"
 import { resolveSecretEnvVars } from "./secrets"
-import { SpendingTracker } from "./spending"
+import { SpendingTracker, type BudgetHaltReason } from "./spending"
 import { terminateChildProcess } from "./process"
 
 const HEARTBEAT_INTERVAL_MS = 10_000
@@ -87,9 +87,9 @@ class Run {
   private readonly cwd = process.cwd()
   private readonly permissionMode: "strict" | "request"
   // Only used to name this run's local files; a random id keeps concurrent runs
-  // on one machine apart if a server does not return one.
   private readonly fileId: string
   private killed = false
+  private killReason: string | null = null
   private activeChild: ChildProcess | null = null
   private engineConfigPath: string | null = null
   // Decisions applied to the engine but not yet confirmed to the control plane.
@@ -156,9 +156,16 @@ class Run {
       if (data.run_token) this.client.replaceToken(data.run_token)
       // Only clear what the server has now been told about, so an
       // acknowledgement lost with a dropped connection is simply repeated.
-      if (hb.status === 200) this.appliedRequestIds = []
-
-      if (data.kill) this.stopAgent("Kill requested from the control plane, stopping.")
+      if (data.kill) {
+        if (data.kill_reason) {
+          this.killReason = String(data.kill_reason)
+        }
+        this.stopAgent(
+          this.killReason === "budget_exceeded" || this.killReason === "unpriced_usage_halt"
+            ? `Server requested spending halt (${this.killReason}); stopping.`
+            : "Kill requested from the control plane, stopping.",
+        )
+      }
 
       // A message is acknowledged only once it has reached the agent. Stopping
       // at the first that cannot be delivered keeps it, and everything after
@@ -206,6 +213,7 @@ class Run {
   private onExitSignal = async (signal: string) => {
     if (this.exiting) return
     this.exiting = true
+    this.killReason = "operator_kill"
     log(`Received ${signal}, finishing run as killed.`)
     clearTimeout(this.heartbeatTimer)
     // The engine's server is spawned with piped stdio, so it outlives this
@@ -385,7 +393,7 @@ class Run {
         {
           onLine: this.onLine,
           onSpawn: (child) => (this.activeChild = child),
-          onStep: (entry, usage, eventId) => void this.postEvent("step", entry, usage, eventId),
+          onStep: (entry, usage, eventId) => this.postEvent("step", entry, usage, eventId),
           onReady: (session) => (this.session = session),
           onAsked: this.raisePermissionRequest,
           onDenied: this.reportRefusedCall,
@@ -430,6 +438,7 @@ class Run {
 
     const outcome = determineTerminalOutcome({
       killed: this.killed,
+      killReason: this.killReason,
       result,
       spending: this.spending,
       interactive: handshake.interactive,
@@ -442,6 +451,7 @@ class Run {
 
 export interface RunOutcome {
   killed: boolean
+  killReason?: string | null
   result: RunResult
   spending: SpendingTracker
   interactive?: boolean
@@ -454,11 +464,13 @@ export interface TerminalOutcome {
 }
 
 export function determineTerminalOutcome(outcome: RunOutcome): TerminalOutcome {
-  if (outcome.killed) {
-    return { status: "killed", message: "stopped by operator", exitCode: 0 }
-  }
+  const budgetHalt =
+    outcome.result.budgetHalt ||
+    outcome.spending.haltReason ||
+    (outcome.killReason === "budget_exceeded" || outcome.killReason === "unpriced_usage_halt"
+      ? (outcome.killReason as BudgetHaltReason)
+      : null)
 
-  const budgetHalt = outcome.result.budgetHalt || outcome.spending.haltReason
   if (budgetHalt) {
     const defaultMsg =
       budgetHalt === "budget_exceeded"
@@ -466,6 +478,10 @@ export function determineTerminalOutcome(outcome: RunOutcome): TerminalOutcome {
         : "Unpriced token usage observed under configured budget."
     const message = outcome.result.error || outcome.spending.haltInfo?.message || defaultMsg
     return { status: budgetHalt, message, exitCode: 1 }
+  }
+
+  if (outcome.killed) {
+    return { status: "killed", message: "stopped by operator", exitCode: 0 }
   }
 
   const status: FinishStatus = outcome.result.success

@@ -168,6 +168,7 @@ export interface PermissionDecision {
 
 export interface HeartbeatResponse {
   kill: boolean
+  kill_reason?: string | null
   status: RunStatus
   /** A replacement run token, when the current one is close to expiring. */
   run_token?: string | null
