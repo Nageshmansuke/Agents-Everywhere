@@ -7,6 +7,11 @@ const RANGES: Array<[FleetRange, string]> = [
   ["7d", "7 days"],
   ["30d", "30 days"],
 ]
+// Up to two weeks every day gets a date label; beyond that, every fifth does.
+const LABEL_EVERY_DAY_UP_TO = 14
+const SPARSE_LABEL_STEP = 5
+// "YYYY-MM-DDTHH": the rolling 24 hours redraws when its start crosses an hour.
+const ISO_HOUR_LENGTH = 13
 
 const dayLabel = (date: string, weekday = false) =>
   new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, {
@@ -115,7 +120,9 @@ function spendByAgent(m: FleetMetrics): HTMLElement {
               h(
                 "div",
                 { class: "agent-bar-head" },
-                r.href ? h("a", { class: "name-link", href: r.href }, r.label) : h("span", { class: "muted" }, r.label),
+                r.href
+                  ? h("a", { class: "name-link", href: r.href, "data-focus-key": `agent:${r.id}` }, r.label)
+                  : h("span", { class: "muted" }, r.label),
                 h(
                   "span",
                   { class: "agent-bar-value" },
@@ -148,17 +155,30 @@ function spendPerDay(m: FleetMetrics, selected: { date: string | null }): HTMLEl
     (best, d) => ((d.spend_usd ?? 0) > (best?.spend_usd ?? 0) ? d : best),
     null,
   )
-  const labelEvery = days.length > 14 ? 5 : 1
+  const labelEvery = days.length > LABEL_EVERY_DAY_UP_TO ? SPARSE_LABEL_STEP : 1
   const describe = (d: (typeof days)[number]) =>
-    `${dayLabel(d.date, true)}: ${d.spend_usd === null ? "activity without cost data" : `${money(d.spend_usd)} recorded`}, ${plural(d.runs, "run")} started`
+    `${dayLabel(d.date, true)}: ` +
+    `${d.spend_usd === null ? "activity without cost data" : `${money(d.spend_usd)} recorded`}, ` +
+    `${plural(d.runs, "run")} started`
 
   if (!selected.date || !days.some((d) => d.date === selected.date))
     selected.date = (highest ?? days[days.length - 1]).date
   const readout = h("p", { class: "day-readout", "aria-live": "polite" })
+  // Unchanged text is not announced again when focus is handed back after a redraw.
+  const preview = (d: (typeof days)[number]) => {
+    if (readout.textContent !== describe(d)) replace(readout, describe(d))
+  }
+  // The one place the selection changes, so a click, focus and an arrow key all
+  // move the single tab stop with it. Hover only previews: a pointer resting on
+  // the chart must not pull the tab stop away from the focused day.
   const show = (d: (typeof days)[number]) => {
     selected.date = d.date
-    replace(readout, describe(d))
-    bars.forEach((bar, i) => bar.setAttribute("aria-current", days[i].date === d.date ? "true" : "false"))
+    bars.forEach((bar, i) => {
+      const current = days[i].date === d.date
+      bar.tabIndex = current ? 0 : -1
+      bar.setAttribute("aria-current", current ? "true" : "false")
+    })
+    preview(d)
   }
 
   const bars = days.map((d, i) => {
@@ -168,12 +188,14 @@ function spendPerDay(m: FleetMetrics, selected: { date: string | null }): HTMLEl
         type: "button",
         class: "day-bar",
         "aria-label": describe(d),
-        tabindex: d.date === selected.date ? 0 : -1,
+        tabindex: -1,
+        "data-focus-key": `day:${d.date}`,
         "data-nocost": d.spend_usd === null ? "true" : null,
       },
       sized(h("span", { class: "day-bar-fill" }), "height", `${((d.spend_usd ?? 0) / top) * 100}%`),
     )
-    bar.addEventListener("pointerenter", () => show(d))
+    bar.addEventListener("pointerenter", () => preview(d))
+    bar.addEventListener("pointerleave", () => preview(days.find((day) => day.date === selected.date)!))
     bar.addEventListener("focus", () => show(d))
     bar.addEventListener("click", () => show(d))
     bar.addEventListener("keydown", (event) => {
@@ -189,8 +211,6 @@ function spendPerDay(m: FleetMetrics, selected: { date: string | null }): HTMLEl
                 : null
       if (next === null || next < 0 || next >= days.length) return
       event.preventDefault()
-      bar.tabIndex = -1
-      bars[next].tabIndex = 0
       bars[next].focus()
     })
     return bar
@@ -303,8 +323,13 @@ export function activityPanel(): { element: HTMLElement; refresh: () => Promise<
         m.refused_actions === 0 &&
         m.completed_runs === 0 &&
         m.agents.length === 0
+      // A redraw replaces every node, so note what had focus and hand it back
+      // afterwards: a live update must not strand someone using the keyboard.
+      const active = document.activeElement
+      const focusKey = active instanceof HTMLElement && body.contains(active) ? active.dataset.focusKey : undefined
       // The interval's ends move every second; only the figures decide a redraw.
-      replaceIfChanged(body, JSON.stringify({ ...m, from: m.from.slice(0, 13), to: null }), () => [
+      const key = JSON.stringify({ ...m, from: m.from.slice(0, ISO_HOUR_LENGTH), to: null })
+      const redrawn = replaceIfChanged(body, key, () => [
         h("div", { class: "panel" }, cards(m)),
         empty
           ? h("p", { class: "panel activity-state muted" }, "No recorded activity in this period.")
@@ -312,9 +337,18 @@ export function activityPanel(): { element: HTMLElement; refresh: () => Promise<
         h(
           "p",
           { class: "hint activity-note" },
-          `${dayLabel(m.from.slice(0, 10))} to ${dayLabel(m.to.slice(0, 10))}, UTC. Spend is the sum of costs runners reported, not a provider bill. Refused actions count recorded denials, not unique prompts.`,
+          `${dayLabel(m.from.slice(0, 10))} to ${dayLabel(m.to.slice(0, 10))}, UTC. ` +
+            "Spend is the sum of costs runners reported, not a provider bill. " +
+            "Refused actions count recorded denials, not unique prompts.",
         ),
       ])
+      if (redrawn && focusKey) {
+        // A day that rolled out of the interval falls back to the selected one.
+        const target =
+          body.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focusKey)}"]`) ??
+          (focusKey.startsWith("day:") ? body.querySelector<HTMLElement>(".day-bar[tabindex='0']") : null)
+        target?.focus({ preventScroll: true })
+      }
     } catch (err) {
       if (request !== latest) return
       replaceIfChanged(body, `error:${requested}`, () => [

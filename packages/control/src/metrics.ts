@@ -15,6 +15,8 @@ export const DEFAULT_FLEET_RANGE: FleetRange = "7d"
 export const TOP_AGENTS = 5
 
 const DAY_MS = 86_400_000
+/** Whole UTC days a calendar range covers, today included. */
+const RANGE_DAYS: Record<Exclude<FleetRange, "24h">, number> = { "7d": 7, "30d": 30 }
 
 export interface FleetInterval {
   from: Date
@@ -26,7 +28,7 @@ export interface FleetInterval {
 export function fleetInterval(range: FleetRange, now: Date): FleetInterval {
   const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
   const from =
-    range === "24h" ? new Date(now.getTime() - DAY_MS) : new Date(midnight - (range === "7d" ? 6 : 29) * DAY_MS)
+    range === "24h" ? new Date(now.getTime() - DAY_MS) : new Date(midnight - (RANGE_DAYS[range] - 1) * DAY_MS)
   const days: string[] = []
   for (
     let day = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());

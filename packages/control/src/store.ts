@@ -102,6 +102,21 @@ export interface AgentSummaryRow extends AgentRow {
   pending_requests: number
 }
 
+/** One agent's activity on one UTC day (`day` is YYYY-MM-DD). */
+export interface ActivitySpendRow {
+  agent_id: string
+  label: string
+  day: string
+  spend: number | null
+}
+
+export interface ActivityRunStartRow {
+  agent_id: string
+  label: string
+  day: string
+  runs: number
+}
+
 export interface NewAgent {
   label: string
   os_shell: OsShell
@@ -624,9 +639,9 @@ export class Store {
   /** Recorded spend per agent per UTC day: at most agents × days rows. Total,
    *  per-agent and per-day spend are all summed from these same rows, so they
    *  cannot disagree. `spend` is null when no event in the group carried a cost. */
-  activitySpend(from: string, to: string): Array<{ agent_id: string; label: string; day: string; spend: number | null }> {
+  activitySpend(from: string, to: string): ActivitySpendRow[] {
     return this.db
-      .query<{ agent_id: string; label: string; day: string; spend: number | null }, [string, string]>(
+      .query<ActivitySpendRow, [string, string]>(
         `SELECT r.agent_id, a.label, substr(e.created_at, 1, 10) AS day, SUM(e.cost_usd) AS spend
          FROM events e JOIN runs r ON r.id = e.run_id JOIN agents a ON a.id = r.agent_id
          WHERE e.created_at >= ? AND e.created_at <= ?
@@ -647,9 +662,9 @@ export class Store {
   }
 
   /** Runs started in the interval, per agent per UTC day. */
-  activityRunStarts(from: string, to: string): Array<{ agent_id: string; label: string; day: string; runs: number }> {
+  activityRunStarts(from: string, to: string): ActivityRunStartRow[] {
     return this.db
-      .query<{ agent_id: string; label: string; day: string; runs: number }, [string, string]>(
+      .query<ActivityRunStartRow, [string, string]>(
         `SELECT r.agent_id, a.label, substr(r.started_at, 1, 10) AS day, COUNT(*) AS runs
          FROM runs r JOIN agents a ON a.id = r.agent_id
          WHERE r.started_at >= ? AND r.started_at <= ?
