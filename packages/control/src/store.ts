@@ -102,6 +102,21 @@ export interface AgentSummaryRow extends AgentRow {
   pending_requests: number
 }
 
+/** One agent's activity on one UTC day (`day` is YYYY-MM-DD). */
+export interface ActivitySpendRow {
+  agent_id: string
+  label: string
+  day: string
+  spend: number | null
+}
+
+export interface ActivityRunStartRow {
+  agent_id: string
+  label: string
+  day: string
+  runs: number
+}
+
 export interface NewAgent {
   label: string
   os_shell: OsShell
@@ -615,6 +630,89 @@ export class Store {
         )
         .run(decision, nowIso(), id, agentId).changes === 1
     )
+  }
+
+  // ── Fleet activity ──────────────────────────────────────────────────────
+  // Every bound is an ISO timestamp, the shape every row stores, so string
+  // comparison is time order and `substr(…, 1, 10)` is the UTC day.
+
+  /** Recorded spend per agent per UTC day: at most agents × days rows. Total,
+   *  per-agent and per-day spend are all summed from these same rows, so they
+   *  cannot disagree. `spend` is null when no event in the group carried a cost. */
+  activitySpend(from: string, to: string): ActivitySpendRow[] {
+    return this.db
+      .query<ActivitySpendRow, [string, string]>(
+        `SELECT r.agent_id, a.label, substr(e.created_at, 1, 10) AS day, SUM(e.cost_usd) AS spend
+         FROM events e JOIN runs r ON r.id = e.run_id JOIN agents a ON a.id = r.agent_id
+         WHERE e.created_at >= ? AND e.created_at <= ?
+         GROUP BY r.agent_id, day`,
+      )
+      .all(from, to)
+  }
+
+  /** Usage reports that carried a cost, and those that reported tokens but no cost. */
+  activityCostCoverage(from: string, to: string): { priced: number; unpriced: number } {
+    return this.db
+      .query<{ priced: number; unpriced: number }, [string, string]>(
+        `SELECT COALESCE(SUM(cost_usd IS NOT NULL), 0) AS priced,
+                COALESCE(SUM(cost_usd IS NULL AND (tokens_in > 0 OR tokens_out > 0)), 0) AS unpriced
+         FROM events WHERE created_at >= ? AND created_at <= ?`,
+      )
+      .get(from, to)!
+  }
+
+  /** Runs started in the interval, per agent per UTC day. */
+  activityRunStarts(from: string, to: string): ActivityRunStartRow[] {
+    return this.db
+      .query<ActivityRunStartRow, [string, string]>(
+        `SELECT r.agent_id, a.label, substr(r.started_at, 1, 10) AS day, COUNT(*) AS runs
+         FROM runs r JOIN agents a ON a.id = r.agent_id
+         WHERE r.started_at >= ? AND r.started_at <= ?
+         GROUP BY r.agent_id, day`,
+      )
+      .all(from, to)
+  }
+
+  /** Median duration of runs that ended in the interval with a start before their end.
+   *  Reads one or two rows at the middle rather than every duration. */
+  medianRunDuration(from: string, to: string): { completed: number; median_ms: number | null } {
+    const where = `FROM runs WHERE ended_at >= ? AND ended_at <= ? AND started_at IS NOT NULL AND ended_at >= started_at`
+    const completed = this.db.query<{ n: number }, [string, string]>(`SELECT COUNT(*) AS n ${where}`).get(from, to)!.n
+    if (completed === 0) return { completed, median_ms: null }
+    const middle = this.db
+      .query<{ ms: number }, [string, string, number, number]>(
+        `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000.0 AS ms ${where} ORDER BY ms LIMIT ? OFFSET ?`,
+      )
+      .all(from, to, completed % 2 === 0 ? 2 : 1, Math.floor((completed - 1) / 2))
+    const median = middle.reduce((sum, row) => sum + row.ms, 0) / middle.length
+    return { completed, median_ms: Math.round(median) }
+  }
+
+  /** Stored `permission_denied` events, counted once each: no join can repeat them. */
+  refusedActions(from: string, to: string): number {
+    return this.db
+      .query<{ n: number }, [string, string]>(
+        "SELECT COUNT(*) AS n FROM events WHERE event_type = 'permission_denied' AND created_at >= ? AND created_at <= ?",
+      )
+      .get(from, to)!.n
+  }
+
+  /** Agents with a live run now. */
+  agentsRunning(): number {
+    return this.db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(DISTINCT agent_id) AS n FROM runs WHERE status IN ('handshaked', 'running')",
+      )
+      .get()!.n
+  }
+
+  /** Requests still waiting on a person: undecided and not yet past their expiry. */
+  awaitingDecisions(now: string): number {
+    return this.db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM permission_requests WHERE status = 'pending' AND expires_at > ?",
+      )
+      .get(now)!.n
   }
 
   // ── Reaper ──────────────────────────────────────────────────────────────
