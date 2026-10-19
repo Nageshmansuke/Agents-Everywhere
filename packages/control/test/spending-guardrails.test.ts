@@ -26,10 +26,10 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
   })
 
   describe("database migration", () => {
-    test("fresh database applies all migrations up to version 5", () => {
+    test("fresh database applies all migrations up to version 6", () => {
       const db = openDatabase(dbFile)
       const versionRow = db.query<{ version: number }, []>("SELECT version FROM schema_version").get()
-      expect(versionRow?.version).toBe(5)
+      expect(versionRow?.version).toBe(6)
 
       // Verify columns exist on fresh schema
       const agentCols = db.query<{ name: string }, []>("PRAGMA table_info(agents)").all()
@@ -41,6 +41,14 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
 
       const eventCols = db.query<{ name: string }, []>("PRAGMA table_info(events)").all()
       expect(eventCols.some((c) => c.name === "client_event_id")).toBe(true)
+
+      // Verify incoming indexes from main exist on fresh schema
+      const eventIndices = db.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "events_created")).toBe(true)
+
+      const runIndices = db.query<{ name: string }, []>("PRAGMA index_list(runs)").all()
+      expect(runIndices.some((i) => i.name === "runs_started")).toBe(true)
+      expect(runIndices.some((i) => i.name === "runs_ended")).toBe(true)
       db.close()
     })
 
@@ -122,10 +130,10 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
         .run()
       rawDb.close()
 
-      // Step 2: Open with openDatabase, which should trigger Migrations 2, 3, and 4
+      // Step 2: Open with openDatabase, which should trigger Migrations 2, 3, 4, and 5
       const upgradedDb = openDatabase(dbFile)
       const versionRow = upgradedDb.query<{ version: number }, []>("SELECT version FROM schema_version").get()
-      expect(versionRow?.version).toBe(5)
+      expect(versionRow?.version).toBe(6)
 
       // Step 3: Verify legacy records survived with spend_limit_usd === null
       const legacyAgent = upgradedDb
@@ -157,7 +165,7 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
       upgradedDb.close()
     })
 
-    test("existing version 3 database (with pagination index) migrates safely to version 5", () => {
+    test("existing version 3 database (with pagination index) migrates safely to version 6", () => {
       // Step 1: Create a version 3 database
       const rawDb = new Database(dbFile, { create: true, strict: true })
       rawDb.exec("PRAGMA foreign_keys = ON")
@@ -229,10 +237,10 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
         .run()
       rawDb.close()
 
-      // Step 2: Open with openDatabase, upgrading from v3 to v5
+      // Step 2: Open with openDatabase, upgrading from v3 to v6
       const upgradedDb = openDatabase(dbFile)
       const versionRow = upgradedDb.query<{ version: number }, []>("SELECT version FROM schema_version").get()
-      expect(versionRow?.version).toBe(5)
+      expect(versionRow?.version).toBe(6)
 
       // Step 3: Verify records and schema
       const agent = upgradedDb
@@ -245,6 +253,105 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
       const run = upgradedDb
         .query<{ id: string; spend_limit_usd: number | null; kill_reason: string | null }, []>(
           "SELECT id, spend_limit_usd, kill_reason FROM runs WHERE id = 'run_v3'",
+        )
+        .get()
+      expect(run?.spend_limit_usd).toBeNull()
+      expect(run?.kill_reason).toBeNull()
+
+      upgradedDb.close()
+    })
+
+    test("existing version 4 database (with activity metric indexes) migrates safely to version 6", () => {
+      // Step 1: Create a version 4 database
+      const rawDb = new Database(dbFile, { create: true, strict: true })
+      rawDb.exec("PRAGMA foreign_keys = ON")
+      rawDb.exec("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+      rawDb.exec(`
+        CREATE TABLE agents (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          os_shell TEXT NOT NULL,
+          location_label TEXT,
+          task TEXT NOT NULL,
+          model_provider TEXT NOT NULL,
+          model_name TEXT NOT NULL,
+          llm_api_key_sealed TEXT,
+          interactive INTEGER NOT NULL DEFAULT 0,
+          permission_mode TEXT NOT NULL DEFAULT 'strict',
+          permission_request_timeout_seconds INTEGER NOT NULL DEFAULT 900,
+          declared_env_vars TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'draft',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          rejection_yaml TEXT NOT NULL DEFAULT '',
+          use_global_config INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          hostname TEXT,
+          run_env TEXT NOT NULL DEFAULT '{}',
+          kill_requested_at TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          last_heartbeat_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE events (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          tokens_in INTEGER NOT NULL DEFAULT 0,
+          tokens_out INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE global_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          yaml TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS runs_agent_pagination ON runs(agent_id, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+        CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at);
+        CREATE INDEX IF NOT EXISTS runs_ended ON runs(ended_at);
+      `)
+      rawDb.exec("INSERT INTO schema_version (version) VALUES (4)")
+
+      rawDb
+        .query(
+          `INSERT INTO agents (id, label, os_shell, task, model_provider, model_name, created_at, updated_at)
+           VALUES ('agent_v4', 'V4 Agent', 'linux_bash', 'v4 task', 'anthropic', 'claude', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb
+        .query(
+          `INSERT INTO runs (id, agent_id, status, created_at)
+           VALUES ('run_v4', 'agent_v4', 'running', '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb.close()
+
+      // Step 2: Open with openDatabase, upgrading from v4 to v6
+      const upgradedDb = openDatabase(dbFile)
+      const versionRow = upgradedDb.query<{ version: number }, []>("SELECT version FROM schema_version").get()
+      expect(versionRow?.version).toBe(6)
+
+      // Step 3: Verify records and schema
+      const agent = upgradedDb
+        .query<{ id: string; spend_limit_usd: number | null }, []>(
+          "SELECT id, spend_limit_usd FROM agents WHERE id = 'agent_v4'",
+        )
+        .get()
+      expect(agent?.spend_limit_usd).toBeNull()
+
+      const run = upgradedDb
+        .query<{ id: string; spend_limit_usd: number | null; kill_reason: string | null }, []>(
+          "SELECT id, spend_limit_usd, kill_reason FROM runs WHERE id = 'run_v4'",
         )
         .get()
       expect(run?.spend_limit_usd).toBeNull()
@@ -1310,11 +1417,11 @@ defaults:
 
     test("18. Database migration preserves prior data and works on fresh initialization", () => {
       // Tested in describe("database migration"):
-      // - Fresh DB initialization creates schema v5 with client_event_id and kill_reason
-      // - Legacy v2/v3 database migrates up to v5 while preserving existing rows
+      // - Fresh DB initialization creates schema v6 with client_event_id and kill_reason
+      // - Legacy v2/v3/v4 database migrates up to v6 while preserving existing rows
       const db = openDatabase(dbFile)
       const version = db.query<{ version: number }, []>("SELECT version FROM schema_version").get()
-      expect(version?.version).toBe(5)
+      expect(version?.version).toBe(6)
       db.close()
     })
 
