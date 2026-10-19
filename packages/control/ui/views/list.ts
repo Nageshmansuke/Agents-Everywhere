@@ -2,20 +2,12 @@ import { api, type AgentSummary } from "../api"
 import { agoNode, h, money, refreshTimes, replace, replaceIfChanged } from "../dom"
 import { icon } from "../icons"
 import { poll } from "../poll"
-import { isLive, linkButton, runStatus } from "../shared"
+import { linkButton, runStatus } from "../shared"
+import { activityPanel } from "./activity"
 
 const REFRESH_MS = 10_000
 // Below this a list is short enough to scan; above it, it gets a search box.
 const SEARCH_THRESHOLD = 6
-
-function stat(label: string, value: string, attention = false) {
-  return h(
-    "div",
-    { class: "stat", "data-tone": attention ? "attention" : null },
-    h("span", { class: "micro-label" }, label),
-    h("span", { class: "stat-value numeral" }, value),
-  )
-}
 
 function row(a: AgentSummary): HTMLElement {
   const modeTag = a.status === "revoked" ? "Revoked" : a.permission_mode === "request" ? "Asks first" : "Strict"
@@ -60,7 +52,7 @@ export async function renderList(main: HTMLElement): Promise<() => void> {
   let agents = await api.get<AgentSummary[]>("/api/agents")
   let query = ""
 
-  const band = h("section", { class: "panel" })
+  const activity = activityPanel()
   const table = h("tbody")
   const count = h("span", { class: "micro-label" })
   const searchInput = h("input", { type: "search", placeholder: "Search agents", "aria-label": "Search agents" })
@@ -69,22 +61,6 @@ export async function renderList(main: HTMLElement): Promise<() => void> {
     query = searchInput.value.trim().toLowerCase()
     drawTable(true)
   })
-
-  const drawBand = () => {
-    const running = agents.filter((a) => isLive(a.latest_run_status)).length
-    const waiting = agents.reduce((n, a) => n + a.pending_permission_requests, 0)
-    const spend = agents.reduce((n, a) => n + a.total_cost_usd, 0)
-    replaceIfChanged(band, `${agents.length}:${running}:${waiting}:${spend}`, () => [
-      h(
-        "div",
-        { class: "stat-row" },
-        stat("Agents", String(agents.length)),
-        stat("Running now", String(running)),
-        stat("Awaiting you", String(waiting), waiting > 0),
-        stat("Spend", money(spend)),
-      ),
-    ])
-  }
 
   const drawTable = (force = false) => {
     const shown = agents.filter(
@@ -135,7 +111,7 @@ export async function renderList(main: HTMLElement): Promise<() => void> {
   replace(
     main,
     masthead,
-    band,
+    activity.element,
     h("div", { class: "section-title" }, h("h2", { class: "micro-label" }, "Fleet"), h("div", { class: "inline" }, search, count)),
     h(
       "section",
@@ -153,12 +129,13 @@ export async function renderList(main: HTMLElement): Promise<() => void> {
       ),
     ),
   )
-  drawBand()
   drawTable()
+  void activity.refresh()
 
   return poll(REFRESH_MS, async () => {
+    // Settles on its own, showing its error in place, so the list refreshes regardless.
+    void activity.refresh()
     agents = await api.get<AgentSummary[]>("/api/agents")
-    drawBand()
     drawTable()
     refreshTimes(main)
   })

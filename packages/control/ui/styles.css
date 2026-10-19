@@ -604,6 +604,264 @@ pre.well {
   }
 }
 
+/* ── Fleet activity ─────────────────────────────────────────────────────── */
+
+.activity > .section-title {
+  margin-top: 0;
+}
+.activity-body {
+  display: grid;
+  gap: var(--space-lg);
+}
+.activity-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  max-width: none;
+  padding: var(--space-xl) var(--card-pad);
+}
+.activity-note {
+  margin-top: calc(-1 * var(--space-sm));
+}
+
+.range-toggle {
+  display: inline-flex;
+}
+.range-toggle .btn {
+  border-radius: 0;
+  margin-left: -1px;
+  color: var(--text-secondary);
+}
+.range-toggle .btn:first-child {
+  margin-left: 0;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.range-toggle .btn:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.range-toggle .btn[aria-pressed="true"] {
+  position: relative;
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.stat-row[data-count="6"] {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.stat-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-height: 20px;
+}
+.stat .hint {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1100px) {
+  .stat-row[data-count="6"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .stat-row[data-count="6"] .stat:nth-child(3n) {
+    border-right: 0;
+  }
+  .stat-row[data-count="6"] .stat:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--border);
+  }
+}
+@media (max-width: 640px) {
+  .stat-row[data-count="6"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .stat-row[data-count="6"] .stat {
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+  }
+  .stat-row[data-count="6"] .stat:nth-child(2n) {
+    border-right: 0;
+  }
+  .stat-row[data-count="6"] .stat:nth-child(-n + 4) {
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.activity-charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: var(--space-lg);
+  align-items: start;
+}
+@media (max-width: 960px) {
+  .activity-charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.chart-empty {
+  padding: var(--space-xl) var(--card-pad);
+}
+
+.agent-bars {
+  display: grid;
+  gap: var(--space-md);
+  margin: 0;
+  padding: var(--card-pad);
+  list-style: none;
+}
+.agent-bar {
+  display: grid;
+  gap: 6px;
+}
+.agent-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  min-width: 0;
+}
+.agent-bar-head > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-bar-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+.bar-track {
+  height: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.bar-fill[data-other] {
+  background: var(--status-neutral);
+}
+
+.day-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-xl);
+  padding: var(--space-md) var(--card-pad) 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+.day-summary strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.day-chart {
+  --plot-h: 168px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-sm);
+  padding: var(--space-lg) var(--card-pad) var(--space-sm);
+  overflow-x: auto;
+}
+.day-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  /* Half a line past each end, so every label centres on its gridline. */
+  height: calc(var(--plot-h) + 1em);
+  margin-top: -0.5em;
+  line-height: 1;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--chrome-size);
+  text-align: right;
+}
+.day-plot {
+  position: relative;
+  display: grid;
+  min-width: calc(var(--days) * 14px);
+}
+.day-grid {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: var(--plot-h);
+  pointer-events: none;
+}
+.day-grid span {
+  border-top: 1px dashed var(--border);
+}
+.day-grid span:last-child {
+  border-top: 1px solid var(--border-strong);
+}
+.day-bars,
+.day-labels {
+  display: grid;
+  grid-template-columns: repeat(var(--days), minmax(0, 1fr));
+  gap: 3px;
+}
+.day-bars {
+  position: relative;
+  height: var(--plot-h);
+}
+.day-bar {
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
+  background: transparent;
+  cursor: pointer;
+}
+.day-bar:hover,
+.day-bar[aria-current="true"] {
+  background-color: var(--bg-raised);
+}
+.day-bar-fill {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  background: var(--accent);
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
+}
+.day-bar[aria-current="true"] .day-bar-fill {
+  background: var(--accent-hover);
+}
+/* Activity without a recorded cost: a hatch at the baseline, never a zero bar.
+   Image longhands only, so the hover and current highlight colour stays beneath it. */
+.day-bar[data-nocost] {
+  background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--border-strong) 3px 4px);
+  background-position: bottom;
+  background-size: 100% 6px;
+  background-repeat: no-repeat;
+}
+.day-labels {
+  padding-top: var(--space-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--chrome-size);
+  white-space: nowrap;
+}
+.day-labels span {
+  overflow: visible;
+}
+.day-readout {
+  max-width: none;
+  padding: var(--space-sm) var(--card-pad) var(--space-lg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
 /* ── Grid table ─────────────────────────────────────────────────────────── */
 
 .grid-table {

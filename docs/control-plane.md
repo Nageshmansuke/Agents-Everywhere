@@ -37,6 +37,10 @@ On the agent's page, create an install command and run it in the directory the a
 node ~/.agents-everywhere-runner/harness.cjs --preflight --api-url=https://agents.example.com
 ```
 
+## Fleet activity
+
+The Agents page opens with a Fleet activity panel for the last 24 hours, 7 days or 30 days, in UTC. Spend is the sum of costs runners reported in the interval, not a provider bill; when some usage reports carried no price, the Spend card says so instead of counting them as zero. Runs count by start time, Median run covers runs that ended in the interval, and Refused actions counts recorded `permission_denied` events. Agents running and Awaiting you are current snapshots. The same aggregates are available to scripts holding the admin token at `GET /api/fleet/metrics?range=24h|7d|30d`; the response carries counts, sums and agent names only, never transcripts or tool inputs.
+
 ## What protects what
 
 - **Rules are enforced on the machine**, by the engine, on every tool call. The control plane only stores them; a stolen control-plane session can change rules for the next run but not reach into a running one.

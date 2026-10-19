@@ -6,6 +6,7 @@
   "license": "MIT",
   "private": true,
   "scripts": {
+    "test:node": "node test/prepare-error.node.ts",
     "typecheck": "tsgo --noEmit"
   },
   "exports": {
