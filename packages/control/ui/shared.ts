@@ -8,7 +8,7 @@ export function isLive(status: string | null): boolean {
   return status !== null && LIVE.has(status)
 }
 
-const STATUS: Record<string, [string, string]> = {
+export const STATUS: Record<string, [string, string]> = {
   pending: ["Waiting to install", "neutral"],
   handshaked: ["Starting", "info"],
   running: ["Running", "success"],
