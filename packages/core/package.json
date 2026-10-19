@@ -10,6 +10,7 @@
     "migration": "bun run script/migration.ts",
     "fix-node-pty": "bun run script/fix-node-pty.ts",
     "test": "bun test --only-failures",
+    "test:node": "node test/sqlite-prepare-error.node.ts",
     "typecheck": "tsgo --noEmit"
   },
   "bin": {

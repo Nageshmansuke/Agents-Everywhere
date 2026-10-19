@@ -1,4 +1,4 @@
-export * as Sqlite from "./sqlite"
+export * as Sqlite from "./sqlite.ts"
 
 import { Context } from "effect"
 import type { drizzle } from "drizzle-orm/bun-sqlite"
