@@ -52,6 +52,109 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
       db.close()
     })
 
+    test("existing version 1 database migrates safely and preserves existing rows", () => {
+      // Step 1: Manually create a version 1 database
+      const rawDb = new Database(dbFile, { create: true, strict: true })
+      rawDb.exec("PRAGMA foreign_keys = ON")
+      rawDb.exec("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+      rawDb.exec(`
+        CREATE TABLE agents (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          os_shell TEXT NOT NULL,
+          location_label TEXT,
+          task TEXT NOT NULL,
+          model_provider TEXT NOT NULL,
+          model_name TEXT NOT NULL,
+          llm_api_key_sealed TEXT,
+          interactive INTEGER NOT NULL DEFAULT 0,
+          permission_mode TEXT NOT NULL DEFAULT 'strict',
+          permission_request_timeout_seconds INTEGER NOT NULL DEFAULT 900,
+          declared_env_vars TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'draft',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          hostname TEXT,
+          run_env TEXT NOT NULL DEFAULT '{}',
+          kill_requested_at TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          last_heartbeat_at TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE events (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          tokens_in INTEGER NOT NULL DEFAULT 0,
+          tokens_out INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL,
+          created_at TEXT NOT NULL
+        );
+      `)
+      rawDb.exec("INSERT INTO schema_version (version) VALUES (1)")
+
+      rawDb
+        .query(
+          `INSERT INTO agents (id, label, os_shell, task, model_provider, model_name, created_at, updated_at)
+           VALUES ('agent_v1', 'V1 Agent', 'linux_bash', 'v1 task', 'anthropic', 'claude', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb
+        .query(
+          `INSERT INTO runs (id, agent_id, status, created_at)
+           VALUES ('run_v1', 'agent_v1', 'running', '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb
+        .query(
+          `INSERT INTO events (id, run_id, event_type, payload, tokens_in, tokens_out, cost_usd, created_at)
+           VALUES ('evt_v1', 'run_v1', 'step', '{}', 10, 5, 0.001, '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb.close()
+
+      // Step 2: Open with openDatabase, upgrading from v1 to v6
+      const upgradedDb = openDatabase(dbFile)
+      const versionRow = upgradedDb.query<{ version: number }, []>("SELECT version FROM schema_version").get()
+      expect(versionRow?.version).toBe(6)
+
+      // Step 3: Verify records survived and schema columns/indexes were added
+      const agent = upgradedDb
+        .query<{ id: string; label: string; rejection_yaml: string; spend_limit_usd: number | null }, []>(
+          "SELECT id, label, rejection_yaml, spend_limit_usd FROM agents WHERE id = 'agent_v1'",
+        )
+        .get()
+      expect(agent?.label).toBe("V1 Agent")
+      expect(agent?.rejection_yaml).toBe("")
+      expect(agent?.spend_limit_usd).toBeNull()
+
+      const run = upgradedDb
+        .query<{ id: string; spend_limit_usd: number | null; kill_reason: string | null }, []>(
+          "SELECT id, spend_limit_usd, kill_reason FROM runs WHERE id = 'run_v1'",
+        )
+        .get()
+      expect(run?.spend_limit_usd).toBeNull()
+      expect(run?.kill_reason).toBeNull()
+
+      const eventIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "events_created")).toBe(true)
+      expect(eventIndices.some((i) => i.name === "idx_events_run_client_event_id")).toBe(true)
+
+      const runIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(runs)").all()
+      expect(runIndices.some((i) => i.name === "runs_started")).toBe(true)
+      expect(runIndices.some((i) => i.name === "runs_ended")).toBe(true)
+
+      upgradedDb.close()
+    })
+
     test("existing version 2 database migrates safely and preserves existing rows", () => {
       // Step 1: Manually create a version 2 database with schema 0 and 1
       const rawDb = new Database(dbFile, { create: true, strict: true })
@@ -162,6 +265,14 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
       expect(legacyEvent).not.toBeNull()
       expect(legacyEvent?.client_event_id).toBeNull()
 
+      const eventIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "events_created")).toBe(true)
+      expect(eventIndices.some((i) => i.name === "idx_events_run_client_event_id")).toBe(true)
+
+      const runIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(runs)").all()
+      expect(runIndices.some((i) => i.name === "runs_started")).toBe(true)
+      expect(runIndices.some((i) => i.name === "runs_ended")).toBe(true)
+
       upgradedDb.close()
     })
 
@@ -257,6 +368,14 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
         .get()
       expect(run?.spend_limit_usd).toBeNull()
       expect(run?.kill_reason).toBeNull()
+
+      const eventIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "events_created")).toBe(true)
+      expect(eventIndices.some((i) => i.name === "idx_events_run_client_event_id")).toBe(true)
+
+      const runIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(runs)").all()
+      expect(runIndices.some((i) => i.name === "runs_started")).toBe(true)
+      expect(runIndices.some((i) => i.name === "runs_ended")).toBe(true)
 
       upgradedDb.close()
     })
@@ -357,7 +476,162 @@ describe("Phase 2 — Spending Guardrails Database and Configuration", () => {
       expect(run?.spend_limit_usd).toBeNull()
       expect(run?.kill_reason).toBeNull()
 
+      const eventIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "events_created")).toBe(true)
+      expect(eventIndices.some((i) => i.name === "idx_events_run_client_event_id")).toBe(true)
+
+      const runIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(runs)").all()
+      expect(runIndices.some((i) => i.name === "runs_started")).toBe(true)
+      expect(runIndices.some((i) => i.name === "runs_ended")).toBe(true)
+
       upgradedDb.close()
+    })
+
+    test("existing version 5 database (with spend_limit_usd columns) migrates safely to version 6", () => {
+      // Step 1: Create a version 5 database (includes spend_limit_usd on agents and runs)
+      const rawDb = new Database(dbFile, { create: true, strict: true })
+      rawDb.exec("PRAGMA foreign_keys = ON")
+      rawDb.exec("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+      rawDb.exec(`
+        CREATE TABLE agents (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          os_shell TEXT NOT NULL,
+          location_label TEXT,
+          task TEXT NOT NULL,
+          model_provider TEXT NOT NULL,
+          model_name TEXT NOT NULL,
+          llm_api_key_sealed TEXT,
+          interactive INTEGER NOT NULL DEFAULT 0,
+          permission_mode TEXT NOT NULL DEFAULT 'strict',
+          permission_request_timeout_seconds INTEGER NOT NULL DEFAULT 900,
+          declared_env_vars TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'draft',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          rejection_yaml TEXT NOT NULL DEFAULT '',
+          use_global_config INTEGER NOT NULL DEFAULT 0,
+          spend_limit_usd REAL
+        );
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          status TEXT NOT NULL,
+          hostname TEXT,
+          run_env TEXT NOT NULL DEFAULT '{}',
+          kill_requested_at TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          last_heartbeat_at TEXT,
+          created_at TEXT NOT NULL,
+          spend_limit_usd REAL
+        );
+        CREATE TABLE events (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          tokens_in INTEGER NOT NULL DEFAULT 0,
+          tokens_out INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE global_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          yaml TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS runs_agent_pagination ON runs(agent_id, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
+        CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at);
+        CREATE INDEX IF NOT EXISTS runs_ended ON runs(ended_at);
+      `)
+      rawDb.exec("INSERT INTO schema_version (version) VALUES (5)")
+
+      rawDb
+        .query(
+          `INSERT INTO agents (id, label, os_shell, task, model_provider, model_name, created_at, updated_at, spend_limit_usd)
+           VALUES ('agent_v5', 'V5 Agent', 'linux_bash', 'v5 task', 'anthropic', 'claude', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 25.50)`,
+        )
+        .run()
+      rawDb
+        .query(
+          `INSERT INTO runs (id, agent_id, status, created_at, spend_limit_usd)
+           VALUES ('run_v5', 'agent_v5', 'running', '2026-01-01T00:00:00Z', 25.50)`,
+        )
+        .run()
+      rawDb
+        .query(
+          `INSERT INTO events (id, run_id, event_type, payload, tokens_in, tokens_out, cost_usd, created_at)
+           VALUES ('evt_v5', 'run_v5', 'step', '{}', 10, 5, 0.001, '2026-01-01T00:00:00Z')`,
+        )
+        .run()
+      rawDb.close()
+
+      // Step 2: Open with openDatabase, upgrading from v5 to v6
+      const upgradedDb = openDatabase(dbFile)
+      const versionRow = upgradedDb.query<{ version: number }, []>("SELECT version FROM schema_version").get()
+      expect(versionRow?.version).toBe(6)
+
+      // Step 3: Verify existing data and new columns/indexes
+      const agent = upgradedDb
+        .query<{ id: string; spend_limit_usd: number | null }, []>(
+          "SELECT id, spend_limit_usd FROM agents WHERE id = 'agent_v5'",
+        )
+        .get()
+      expect(agent?.spend_limit_usd).toBe(25.50)
+
+      const run = upgradedDb
+        .query<{ id: string; spend_limit_usd: number | null; kill_reason: string | null }, []>(
+          "SELECT id, spend_limit_usd, kill_reason FROM runs WHERE id = 'run_v5'",
+        )
+        .get()
+      expect(run?.spend_limit_usd).toBe(25.50)
+      expect(run?.kill_reason).toBeNull()
+
+      const event = upgradedDb
+        .query<{ id: string; client_event_id: string | null }, []>(
+          "SELECT id, client_event_id FROM events WHERE id = 'evt_v5'",
+        )
+        .get()
+      expect(event?.client_event_id).toBeNull()
+
+      const eventIndices = upgradedDb.query<{ name: string }, []>("PRAGMA index_list(events)").all()
+      expect(eventIndices.some((i) => i.name === "idx_events_run_client_event_id")).toBe(true)
+
+      upgradedDb.close()
+    })
+
+    test("migration idempotency: reopening an already-migrated database does not re-apply migrations or bump version", () => {
+      const db1 = openDatabase(dbFile)
+      expect(db1.query<{ version: number }, []>("SELECT version FROM schema_version").get()?.version).toBe(6)
+      db1
+        .query(
+          `INSERT INTO agents (id, label, os_shell, task, model_provider, model_name, created_at, updated_at, spend_limit_usd)
+           VALUES ('agent_idem', 'Idem Agent', 'linux_bash', 'task', 'anthropic', 'claude', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 10.0)`,
+        )
+        .run()
+      db1.close()
+
+      // Reopening must not fail, duplicate migrations, or change version
+      const db2 = openDatabase(dbFile)
+      expect(db2.query<{ version: number }, []>("SELECT version FROM schema_version").get()?.version).toBe(6)
+      const agent = db2
+        .query<{ id: string; spend_limit_usd: number }, []>("SELECT id, spend_limit_usd FROM agents WHERE id = 'agent_idem'")
+        .get()
+      expect(agent?.spend_limit_usd).toBe(10.0)
+      db2.close()
+    })
+
+    test("reopening database written by newer control plane throws clear upgrade error", () => {
+      const rawDb = new Database(dbFile, { create: true, strict: true })
+      rawDb.exec("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+      rawDb.exec("INSERT INTO schema_version (version) VALUES (99)")
+      rawDb.close()
+
+      expect(() => openDatabase(dbFile)).toThrow(/newer control plane \(schema 99\)/)
     })
   })
 
@@ -1456,6 +1730,61 @@ defaults:
       })
       expect(finishRes.status).toBe(200)
       expect(store.getRun(runId)?.status).toBe("succeeded")
+      db.close()
+    })
+
+    test("TASK 3: unbudgeted runs can report usage without client event IDs and persist correctly", async () => {
+      const { db, store, keys, runtime } = setupRuntime()
+      const { runId, runToken } = await setupActiveRun(runtime, store, keys, null)
+
+      // 1. Post usage event with tokens and cost, completely omitting event_id and id
+      const res1 = await callEvent(runtime, runToken, {
+        event_type: "step",
+        payload: { step: 1, message: "unbudgeted usage without id" },
+        tokens_in: 500,
+        tokens_out: 250,
+        cost_usd: 0.05,
+      })
+      expect(res1.status).toBe(200)
+
+      // 2. Post unpriced token usage without event_id and id
+      const res2 = await callEvent(runtime, runToken, {
+        event_type: "step",
+        payload: { step: 2, message: "unbudgeted unpriced usage" },
+        tokens_in: 100,
+        tokens_out: 50,
+        cost_usd: null,
+      })
+      expect(res2.status).toBe(200)
+
+      // 3. Post event with explicit null event_id
+      const res3 = await callEvent(runtime, runToken, {
+        event_id: null,
+        event_type: "step",
+        payload: { step: 3, message: "explicit null id" },
+        tokens_in: 50,
+        tokens_out: 25,
+        cost_usd: 0.01,
+      })
+      expect(res3.status).toBe(200)
+
+      // 4. Verify all events are persisted and client_event_id is NULL
+      const events = store.events(runId)
+      expect(events.length).toBe(3)
+      for (const evt of events) {
+        expect(evt.client_event_id).toBeNull()
+      }
+
+      // 5. Verify run usage calculation reflects reported usage without halting
+      const usage = store.runUsage(runId)
+      expect(usage.total_cost).toBe(0.06)
+      expect(usage.unpriced_count).toBe(1)
+
+      const run = store.getRun(runId)
+      expect(run?.kill_requested_at).toBeNull()
+      expect(run?.kill_reason).toBeNull()
+      expect(run?.status).toBe("running")
+
       db.close()
     })
 

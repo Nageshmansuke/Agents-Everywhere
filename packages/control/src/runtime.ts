@@ -210,7 +210,9 @@ export class RuntimeApi {
 
     const rawId = body.event_id ?? body.id
 
-    if (isUsageBearing) {
+    const hasActiveBudget = run.spend_limit_usd !== null && run.spend_limit_usd !== undefined
+
+    if (hasActiveBudget && isUsageBearing) {
       if (rawId === undefined || rawId === null) {
         throw new HttpError(400, "Usage-bearing event requires a valid event ID")
       }

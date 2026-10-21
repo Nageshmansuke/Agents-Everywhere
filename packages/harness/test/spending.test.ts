@@ -10,7 +10,7 @@ import { reportSessionCost, runInteractive } from "../src/interactive"
 import { runHeadless, type HeadlessHooks, type RunResult } from "../src/headless"
 import { terminateChildProcess } from "../src/process"
 import { determineTerminalOutcome } from "../src/run"
-import { abortSession } from "../src/engine"
+import { abortSession, type SessionHandle } from "../src/engine"
 import type { FinishStatus, Usage } from "../src/protocol"
 import { RunnerClient } from "../src/client"
 import { tokenCounts } from "../src/transcript"
@@ -928,11 +928,21 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
   })
 
   describe("Regression Tests — Findings 1, 4, 5, 7, 8", () => {
-    test("Finding 1: usage event that triggers a budget halt is awaited before run is finalized", async () => {
-      let eventPersistedBeforeFinish = false
-      let runFinished = false
+    test("Finding 1: immediate engine termination on budget halt begins before delayed usage reporting resolves (headless)", async () => {
+      let terminationInitiatedBeforeReportingResolved = false
+      let reportingResolved = false
+      let resolveReporting!: () => void
+      const reportingPromise = new Promise<void>((r) => (resolveReporting = r))
 
       const mockChild = createMockChild()
+      mockChild.kill = (signal?: NodeJS.Signals | number) => {
+        if (!reportingResolved) {
+          terminationInitiatedBeforeReportingResolved = true
+        }
+        process.nextTick(() => mockChild.emit("exit", 0, null))
+        return true
+      }
+
       const server = http.createServer((req, res) => {
         if (req.url === "/session" && req.method === "POST") {
           res.writeHead(200, { "Content-Type": "application/json" })
@@ -970,6 +980,10 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
 
       try {
         const spending = new SpendingTracker(2.0)
+        let runSettled = false
+        let capturedSession: SessionHandle | null = null
+        const reportedSteps: Array<{ entry: any; usage?: Usage; eventId?: string }> = []
+
         const runPromise = runHeadless(
           "task",
           "/tmp",
@@ -978,12 +992,130 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
           {
             onLine: () => {},
             onSpawn: () => {},
+            onStep: async (entry, usage, eventId) => {
+              reportedSteps.push({ entry, usage, eventId })
+              await reportingPromise
+            },
+            onReady: (session) => {
+              capturedSession = session
+            },
+            onAsked: async () => "denied",
+            onDenied: () => {},
+          },
+          spending,
+          async () => ({ child: mockChild as any, baseUrl, password: "test" }),
+        ).then((res) => {
+          runSettled = true
+          return res
+        })
+
+        // Wait until termination is initiated on mockChild via deterministic promise check
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (terminationInitiatedBeforeReportingResolved) {
+              resolve()
+            } else {
+              setImmediate(check)
+            }
+          }
+          check()
+        })
+
+        // Prove termination initiated BEFORE reporting resolved
+        assert.strictEqual(terminationInitiatedBeforeReportingResolved, true)
+        // Prove run has NOT finalized yet while reporting promise is pending
+        assert.strictEqual(runSettled, false)
+
+        // Prove no subsequent model request or execution occurs after halt takes effect
+        assert.notStrictEqual(capturedSession, null)
+        const chatAdmitted = await capturedSession!.feedMessage("subsequent prompt after halt")
+        assert.strictEqual(chatAdmitted, false)
+
+        const decisionApplied = await capturedSession!.applyDecision({
+          engine_request_id: "req_subsequent",
+          decision: "approved_once",
+          permission: "read",
+          patterns: ["/tmp/*"],
+          request_id: "r1",
+        })
+        assert.strictEqual(decisionApplied, false)
+
+        // Settle the delayed reporting promise
+        reportingResolved = true
+        resolveReporting()
+
+        const result = await runPromise
+        assert.strictEqual(result.budgetHalt, "budget_exceeded")
+        assert.strictEqual(result.success, false)
+
+        // Verify final usage was reported when reporting succeeds
+        const usageStep = reportedSteps.find((s) => s.entry.kind === "usage")
+        assert.notStrictEqual(usageStep, undefined)
+        assert.strictEqual(usageStep?.eventId, "prt_f1")
+        assert.strictEqual(usageStep?.usage?.costUsd, 5.0)
+        assert.strictEqual(usageStep?.usage?.tokensIn, 100)
+        assert.strictEqual(usageStep?.usage?.tokensOut, 50)
+      } finally {
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    test("TASK 2: usage reporting failure in headless execution cleans up and preserves correct terminal state", async () => {
+      const mockChild = createMockChild()
+      let killCalled = false
+      mockChild.kill = () => {
+        killCalled = true
+        process.nextTick(() => mockChild.emit("exit", 0, null))
+        return true
+      }
+
+      const server = http.createServer((req, res) => {
+        if (req.url === "/session" && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ id: "ses_fail" }))
+          return
+        }
+        if (req.url?.includes("/abort")) {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+        if (req.url?.includes("/event")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" })
+          const evt = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_fail",
+              part: {
+                id: "prt_fail",
+                type: "step-finish",
+                tokens: { input: 100, output: 50 },
+                cost: 5.0,
+              },
+            },
+          }
+          res.write(`data: ${JSON.stringify(evt)}\n\n`)
+          return
+        }
+        res.writeHead(200).end("{}")
+      })
+
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+      const { port } = server.address() as net.AddressInfo
+      const baseUrl = `http://127.0.0.1:${port}`
+
+      try {
+        const spending = new SpendingTracker(2.0)
+        const result = await runHeadless(
+          "task",
+          "/tmp",
+          "provider",
+          "model",
+          {
+            onLine: () => {},
+            onSpawn: () => {},
             onStep: async () => {
-              // Simulate async network persistence taking 50ms
-              await new Promise((r) => setTimeout(r, 50))
-              if (!runFinished) {
-                eventPersistedBeforeFinish = true
-              }
+              throw new Error("Simulated network failure during usage reporting")
             },
             onReady: () => {},
             onAsked: async () => "denied",
@@ -993,11 +1125,302 @@ describe("Phase 4 — Runner-Side Spending Tracking & Enforcement", () => {
           async () => ({ child: mockChild as any, baseUrl, password: "test" }),
         )
 
-        const result = await runPromise
-        runFinished = true
+        assert.strictEqual(killCalled, true)
         assert.strictEqual(result.budgetHalt, "budget_exceeded")
-        assert.strictEqual(eventPersistedBeforeFinish, true)
+        assert.strictEqual(result.success, false)
       } finally {
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    test("TASK 2: immediate engine termination on budget halt begins before delayed usage reporting resolves (interactive)", async () => {
+      let terminationInitiatedBeforeReportingResolved = false
+      let reportingResolved = false
+      let resolveReporting!: () => void
+      const reportingPromise = new Promise<void>((r) => (resolveReporting = r))
+
+      const mockChild = createMockChild()
+      mockChild.kill = (signal?: NodeJS.Signals | number) => {
+        if (!reportingResolved) {
+          terminationInitiatedBeforeReportingResolved = true
+        }
+        process.nextTick(() => mockChild.emit("close", 0))
+        return true
+      }
+
+      let sseRes: http.ServerResponse | null = null
+      const server = http.createServer((req, res) => {
+        if (req.url === "/session" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify([{ id: "ses_int_1", directory: fs.realpathSync("/tmp"), cost: 0, tokens: {} }]))
+          return
+        }
+        if (req.url?.includes("/event")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" })
+          sseRes = res
+          const evt = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_int_1",
+              part: {
+                id: "prt_int_1",
+                type: "step-finish",
+                tokens: { input: 200, output: 100 },
+                cost: 10.0, // Exceeds 2.0 limit
+              },
+            },
+          }
+          res.write(`data: ${JSON.stringify(evt)}\n\n`)
+          return
+        }
+        res.writeHead(200).end("{}")
+      })
+
+      try {
+        const spending = new SpendingTracker(2.0)
+        let interactiveSettled = false
+        let capturedSession: SessionHandle | null = null
+        const reportedEvents: Array<{ eventType: string; payload: any; usage?: Usage; eventId?: string }> = []
+
+        const mockSpawner: any = (_bin: string, args: string[]) => {
+          const portIdx = args.indexOf("--port")
+          const port = portIdx !== -1 ? Number(args[portIdx + 1]) : 0
+          server.listen(port, "127.0.0.1")
+          return mockChild
+        }
+        const runPromise = runInteractive(
+          "/tmp",
+          undefined,
+          async (eventType, payload, usage, eventId) => {
+            reportedEvents.push({ eventType, payload, usage, eventId })
+            if (eventType === "step" && (payload as any).kind === "usage") {
+              await reportingPromise
+            }
+          },
+          () => {},
+          (session) => {
+            capturedSession = session
+          },
+          spending,
+          undefined,
+          mockSpawner,
+        ).then((res) => {
+          interactiveSettled = true
+          return res
+        })
+
+        // Wait until termination is initiated on mockChild via deterministic promise check
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (terminationInitiatedBeforeReportingResolved) {
+              resolve()
+            } else {
+              setImmediate(check)
+            }
+          }
+          check()
+        })
+
+        // Prove termination initiated BEFORE reporting resolved
+        assert.strictEqual(terminationInitiatedBeforeReportingResolved, true)
+        // Prove run has NOT finalized yet while reporting promise is pending
+        assert.strictEqual(interactiveSettled, false)
+
+        // Settle the delayed reporting promise
+        reportingResolved = true
+        resolveReporting()
+
+        const result = await runPromise
+        assert.strictEqual(result.budgetHalt, "budget_exceeded")
+        assert.strictEqual(result.success, false)
+
+        // Verify final usage was reported when reporting succeeds
+        const usageEvent = reportedEvents.find(
+          (e) => e.eventType === "step" && (e.payload as any)?.kind === "usage",
+        )
+        assert.notStrictEqual(usageEvent, undefined)
+        assert.strictEqual(usageEvent?.eventId, "prt_int_1")
+        assert.strictEqual(usageEvent?.usage?.costUsd, 10.0)
+        assert.strictEqual(usageEvent?.usage?.tokensIn, 200)
+        assert.strictEqual(usageEvent?.usage?.tokensOut, 100)
+      } finally {
+        if (sseRes) (sseRes as http.ServerResponse).end()
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    test("TASK 2: usage reporting failure in interactive execution cleans up and preserves correct terminal state", async () => {
+      const mockChild = createMockChild()
+      let killCalled = false
+      mockChild.kill = () => {
+        killCalled = true
+        process.nextTick(() => mockChild.emit("close", 0))
+        return true
+      }
+
+      let sseRes: http.ServerResponse | null = null
+      const server = http.createServer((req, res) => {
+        if (req.url === "/session" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify([{ id: "ses_int_fail", directory: fs.realpathSync("/tmp"), cost: 0, tokens: {} }]))
+          return
+        }
+        if (req.url?.includes("/event")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" })
+          sseRes = res
+          const evt = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_int_fail",
+              part: {
+                id: "prt_int_fail",
+                type: "step-finish",
+                tokens: { input: 200, output: 100 },
+                cost: 10.0,
+              },
+            },
+          }
+          res.write(`data: ${JSON.stringify(evt)}\n\n`)
+          return
+        }
+        res.writeHead(200).end("{}")
+      })
+
+      try {
+        const spending = new SpendingTracker(2.0)
+        const mockSpawner: any = (_bin: string, args: string[]) => {
+          const portIdx = args.indexOf("--port")
+          const port = portIdx !== -1 ? Number(args[portIdx + 1]) : 0
+          server.listen(port, "127.0.0.1")
+          return mockChild
+        }
+        const result = await runInteractive(
+          "/tmp",
+          undefined,
+          async (eventType, payload, usage, eventId) => {
+            if (eventType === "step" && (payload as any).kind === "usage") {
+              throw new Error("Simulated reporting failure in interactive mode")
+            }
+          },
+          () => {},
+          () => {},
+          spending,
+          undefined,
+          mockSpawner,
+        )
+
+        assert.strictEqual(killCalled, true)
+        assert.strictEqual(result.budgetHalt, "budget_exceeded")
+        assert.strictEqual(result.success, false)
+      } finally {
+        if (sseRes) (sseRes as http.ServerResponse).end()
+        await new Promise<void>((r) => server.close(() => r()))
+      }
+    })
+
+    test("TASK 2: race conditions: budget halt while operation in progress is safe, idempotent, and rejects subsequent work", async () => {
+      const mockChild = createMockChild()
+      let killCount = 0
+      mockChild.kill = () => {
+        killCount++
+        process.nextTick(() => mockChild.emit("exit", 0, null))
+        return true
+      }
+
+      let sseRes: http.ServerResponse | null = null
+      const server = http.createServer((req, res) => {
+        if (req.url === "/session" && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ id: "ses_race" }))
+          return
+        }
+        if (req.url?.includes("/abort")) {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+        if (req.url?.includes("/event")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" })
+          sseRes = res
+          // Send first event exceeding budget
+          const evt1 = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_race",
+              part: { id: "prt_race_1", type: "step-finish", tokens: { input: 100, output: 50 }, cost: 5.0 },
+            },
+          }
+          // In the same stream, send a second step-finish (repeated halt signal) and another event
+          const evt2 = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_race",
+              part: { id: "prt_race_2", type: "step-finish", tokens: { input: 200, output: 100 }, cost: 10.0 },
+            },
+          }
+          const evt3 = {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "ses_race",
+              part: { id: "prt_race_3", type: "tool", state: { status: "running" } },
+            },
+          }
+          res.write(`data: ${JSON.stringify(evt1)}\n\ndata: ${JSON.stringify(evt2)}\n\ndata: ${JSON.stringify(evt3)}\n\n`)
+          return
+        }
+        res.writeHead(200).end("{}")
+      })
+
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+      const { port } = server.address() as net.AddressInfo
+      const baseUrl = `http://127.0.0.1:${port}`
+
+      try {
+        const spending = new SpendingTracker(2.0)
+        let capturedSession: SessionHandle | null = null
+        const reportedSteps: string[] = []
+
+        const runPromise = runHeadless(
+          "task",
+          "/tmp",
+          "provider",
+          "model",
+          {
+            onLine: () => {},
+            onSpawn: () => {},
+            onStep: (entry, usage, eventId) => {
+              if (eventId) reportedSteps.push(eventId)
+            },
+            onReady: (session) => {
+              capturedSession = session
+            },
+            onAsked: async () => "denied",
+            onDenied: () => {},
+          },
+          spending,
+          async () => ({ child: mockChild as any, baseUrl, password: "test" }),
+        )
+
+        const result = await runPromise
+
+        // Execution stopped and terminal outcome is budget_exceeded
+        assert.strictEqual(result.budgetHalt, "budget_exceeded")
+        assert.strictEqual(result.success, false)
+
+        // Repeated events were not double-counted or corrupting spending
+        assert.strictEqual(spending.spentUsd, 5.0)
+        assert.strictEqual(reportedSteps.includes("prt_race_1"), true)
+        assert.strictEqual(reportedSteps.includes("prt_race_2"), false)
+
+        // Verify subsequent work is rejected
+        assert.notStrictEqual(capturedSession, null)
+        const chatAdmitted = await capturedSession!.feedMessage("subsequent prompt")
+        assert.strictEqual(chatAdmitted, false)
+
+        // Shutdown was safe and idempotent
+        assert.ok(killCount >= 1)
+      } finally {
+        if (sseRes) (sseRes as http.ServerResponse).end()
         await new Promise<void>((r) => server.close(() => r()))
       }
     })

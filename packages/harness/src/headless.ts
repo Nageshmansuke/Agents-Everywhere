@@ -125,12 +125,17 @@ export async function runHeadless(
     }
   }
 
+  let pendingReporting: Promise<unknown> | null = null
+
   // The event stream is not the only word on this: a missed "busy" must not
   // end a run that is working, so the engine is asked before the run ends.
   const finishIfStillIdle = async () => {
     if (await engineIsBusy()) {
       idleTimer = setTimeout(finishIfStillIdle, CHAT_IDLE_GRACE_MS)
       return
+    }
+    if (pendingReporting) {
+      await pendingReporting
     }
     if (spending?.haltInfo) {
       resolveFinished({
@@ -159,24 +164,30 @@ export async function runHeadless(
   // grace timer. This is also what makes a kill take seconds.
   child.on("exit", (code, signal) => {
     clearTimeout(idleTimer)
-    if (spending?.haltInfo) {
+    void (async () => {
+      if (pendingReporting) {
+        await pendingReporting
+      }
+      if (spending?.haltInfo) {
+        resolveFinished({
+          success: false,
+          exitCode: code,
+          error: spending.haltInfo.message,
+          budgetHalt: spending.haltInfo.reason,
+        })
+        return
+      }
       resolveFinished({
         success: false,
         exitCode: code,
-        error: spending.haltInfo.message,
-        budgetHalt: spending.haltInfo.reason,
+        error: signal ? `The agent stopped (${signal}).` : `The agent exited unexpectedly (exit code ${code}).`,
       })
-      return
-    }
-    resolveFinished({
-      success: false,
-      exitCode: code,
-      error: signal ? `The agent stopped (${signal}).` : `The agent exited unexpectedly (exit code ${code}).`,
-    })
+    })()
   })
 
   const transcript = createTranscript(cwd, { prompts: false })
   const events = subscribeEngineEvents(baseUrl, authHeader, (event) => {
+    if (spending?.haltInfo) return
     const props = event.properties || {}
     if (props.sessionID && props.sessionID !== sessionId) return
 
@@ -199,25 +210,34 @@ export async function runHeadless(
           { tokensIn: tokens.in, tokensOut: tokens.out, costUsd: typeof part.cost === "number" ? part.cost : null },
           stepId,
         )
+        const reportingPromise =
+          stepPost && typeof (stepPost as Promise<unknown>).then === "function"
+            ? (stepPost as Promise<unknown>).catch((err) => {
+                log(`Failed to report usage event: ${err}`)
+              })
+            : null
+        if (reportingPromise) {
+          pendingReporting = reportingPromise
+        }
         if (spending) {
           const halt = spending.recordStepUsage(part)
           if (halt) {
             onLine(`[budget] Stopping run: ${halt.message}`)
-            void (async () => {
-              if (stepPost && typeof (stepPost as Promise<unknown>).then === "function") {
-                await (stepPost as Promise<unknown>).catch(() => {})
+            clearTimeout(idleTimer)
+            events.close()
+            void abortSession(baseUrl, authHeader, sessionId).then((abortRes) => {
+              if (!abortRes.ok) {
+                log(`Session abort request did not succeed: ${abortRes.error || `HTTP ${abortRes.status}`}`)
               }
-              void abortSession(baseUrl, authHeader, sessionId).then((abortRes) => {
-                if (!abortRes.ok) {
-                  log(`Session abort request did not succeed: ${abortRes.error || `HTTP ${abortRes.status}`}`)
-                }
-              })
-              clearTimeout(idleTimer)
-              events.close()
-              terminateChildProcess(child)
+            }).catch(() => {})
+            terminateChildProcess(child)
+            void (async () => {
+              if (reportingPromise) {
+                await reportingPromise
+              }
               resolveFinished({
                 success: false,
-                exitCode: 0,
+                exitCode: child.exitCode ?? 0,
                 error: halt.message,
                 budgetHalt: halt.reason,
               })
@@ -316,6 +336,7 @@ export async function runHeadless(
       }
     },
     applyDecision: async (decision) => {
+      if (spending?.haltInfo) return false
       if (!pendingEscalations.has(decision.engine_request_id)) return false
       const reply = DECISION_REPLIES[decision.decision] || "reject"
       if (decision.decision === "expired") sawUnansweredEscalation = true

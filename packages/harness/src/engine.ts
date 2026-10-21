@@ -193,6 +193,7 @@ export const DECISION_REPLIES: Record<PermissionDecision["decision"], EngineRepl
  * cost and tokens, that the engine's own `--format json` output uses.
  */
 export function subscribeEngineEvents(baseUrl: string, authHeader: string, onEvent: (event: any) => void) {
+  let closed = false
   const u = new URL(`${baseUrl}/event`)
   const mod = u.protocol === "https:" ? https : http
   const req = mod.request(
@@ -202,9 +203,10 @@ export function subscribeEngineEvents(baseUrl: string, authHeader: string, onEve
       let buffer = ""
       res.setEncoding("utf8")
       res.on("data", (chunk) => {
+        if (closed) return
         buffer += chunk
         let idx: number
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        while (!closed && (idx = buffer.indexOf("\n\n")) !== -1) {
           const frame = buffer.slice(0, idx)
           buffer = buffer.slice(idx + 2)
           const line = frame.split("\n").find((l) => l.startsWith("data:"))
@@ -223,7 +225,12 @@ export function subscribeEngineEvents(baseUrl: string, authHeader: string, onEve
        the idle grace) rather than needing its own handling here */
   })
   req.end()
-  return { close: () => req.destroy() }
+  return {
+    close: () => {
+      closed = true
+      req.destroy()
+    },
+  }
 }
 
 /**

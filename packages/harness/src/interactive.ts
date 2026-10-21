@@ -144,6 +144,7 @@ export function runInteractive(
   onReady: (session: SessionHandle) => void,
   spending?: SpendingTracker,
   fetchSession: (cwd: string) => Promise<(SessionTotals & { id: string }) | undefined> = defaultFetchSession,
+  childSpawner: typeof spawn = spawn,
 ): Promise<RunResult> {
   if (spending) {
     const admission = spending.canAdmitTurn()
@@ -161,6 +162,7 @@ export function runInteractive(
   return new Promise((resolve) => {
     let activeChild: ChildProcess | null = null
     let interactiveHalt: BudgetHalt | null = null
+    let pendingReporting: Promise<unknown> | null = null
     // The TUI's own server once reachable, and the session the person is
     // working in. A message from the control plane goes into that session,
     // where the TUI shows it and the agent answers it like anything typed.
@@ -195,6 +197,9 @@ export function runInteractive(
 
     const sessionHandle = (): SessionHandle => ({
       feedMessage: async (message) => {
+        if (interactiveHalt || spending?.haltInfo) {
+          return false
+        }
         if (spending) {
           const admission = spending.canAdmitTurn()
           if (!admission.ok) {
@@ -235,6 +240,7 @@ export function runInteractive(
       // What each open terminal question asked, so its answer can say what it allowed.
       const asked = new Map<string, string>()
       events = subscribeEngineEvents(baseUrl, authHeader, (event) => {
+        if (interactiveHalt || spending?.haltInfo) return
         const props = event.properties || {}
         const part = props.part
         const info = props.info
@@ -290,17 +296,27 @@ export function runInteractive(
           }
           if (spending) spending.finishTurn()
           const stepId = typeof part.id === "string" ? part.id : undefined
-          void postEvent(
+          const stepPost = postEvent(
             "step",
             { kind: "usage", message: "Step finished" },
             { tokensIn: tokens.in, tokensOut: tokens.out, costUsd: typeof part.cost === "number" ? part.cost : null },
             stepId,
           )
+          const reportingPromise =
+            stepPost && typeof (stepPost as Promise<unknown>).then === "function"
+              ? (stepPost as Promise<unknown>).catch((err) => {
+                  log(`Failed to report usage event: ${err}`)
+                })
+              : null
+          if (reportingPromise) {
+            pendingReporting = reportingPromise
+          }
           if (spending) {
             const halt = spending.recordStepUsage(part)
             if (halt) {
               interactiveHalt = halt
               log(`[budget] Stopping interactive session: ${halt.message}`)
+              if (events) events.close()
               if (activeChild) terminateChildProcess(activeChild)
             }
           }
@@ -341,7 +357,7 @@ export function runInteractive(
         ...(model ? ["--model", model] : []),
         ...(port ? ["--port", String(port), "--hostname", "127.0.0.1"] : []),
       ]
-      const child = spawn(engineBinPath(), args, {
+      const child = childSpawner(engineBinPath(), args, {
         cwd,
         env: port ? { ...process.env, AGENTS_EVERYWHERE_SERVER_PASSWORD: password! } : process.env,
         stdio: "inherit",
@@ -353,6 +369,9 @@ export function runInteractive(
       child.on("close", async (code) => {
         cancelled = true
         if (events) events.close()
+        if (pendingReporting) {
+          await pendingReporting
+        }
         const needsFallback =
           !sawLiveUsage || (Boolean(spending && spending.limitUsd !== null) && !spending?.hasLiveUsage)
         if (needsFallback && !interactiveHalt && !spending?.haltInfo) {
